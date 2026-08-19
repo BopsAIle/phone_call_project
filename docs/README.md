@@ -22,4 +22,5 @@ _No features documented yet._
 
 <!-- Add one line per plan: - [Feature name](plan/YYYY-MM-DD-<feature-slug>.md) — status -->
 
-_No plans yet._
+- [AI Receptionist — Phone Booking Agent](plan/2026-08-19-ai-receptionist-phone-booking-agent.md) — draft
+  (built in 7 stages; detailed per-phase plans in [plan/phases/](plan/phases/README.md))
