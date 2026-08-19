@@ -3,6 +3,9 @@
 /node_modules
 /build
 
+# Prisma client, generated into src/ (see prisma/schema.prisma for why)
+/src/generated
+
 # Logs
 logs
 *.log

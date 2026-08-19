@@ -1,0 +1,104 @@
+// Prisma 7. Two things differ from the 5/6-era setup and are load-bearing:
+//
+//  1. The datasource block carries no `url` — the CLI reads it from
+//     prisma.config.ts, and the runtime client is constructed with an explicit
+//     driver adapter (see src/prisma/prisma.service.ts).
+//  2. The generator must emit CommonJS. The default `prisma-client` output is
+//     ESM using `import.meta.url` and `.ts`-extension imports, which cannot
+//     compile in this project (module: nodenext, no "type": "module").
+//
+// The output path is inside src/ on purpose. src/prisma/prisma.service.ts
+// imports the generated client, so TypeScript pulls it into the build program
+// no matter what tsconfig.build.json excludes. Anywhere outside src/ and the
+// inferred output root becomes the repo root, silently moving the entry point
+// from dist/main.js to dist/src/main.js and breaking `npm run start:prod`.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  runtime             = "nodejs"
+  moduleFormat        = "cjs"
+  importFileExtension = ""
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Store {
+  id            String  @id @default(cuid())
+  name          String
+  phoneNumber   String  @unique // Twilio number, E.164
+  timezone      String  @default("Europe/Berlin")
+  defaultLocale String  @default("en")
+  greetingEn    String
+  greetingDe    String
+  calls         Call[]
+}
+
+model Call {
+  id            String     @id @default(cuid())
+  storeId       String
+  twilioCallSid String     @unique
+  streamSid     String?
+  fromNumber    String
+  toNumber      String
+  locale        String? // detected: "en" | "de"
+  status        CallStatus @default(IN_PROGRESS)
+  startedAt     DateTime   @default(now())
+  endedAt       DateTime?
+  durationSec   Int?
+  endReason     String? // completed | caller_hangup | timeout | error | escalated
+
+  store      Store       @relation(fields: [storeId], references: [id])
+  utterances Utterance[]
+  booking    Booking?
+}
+
+model Utterance {
+  id        String   @id @default(cuid())
+  callId    String
+  role      Role // CALLER | AGENT
+  text      String
+  startMs   Int
+  latencyMs Int? // per-stage timing, for tuning
+  createdAt DateTime @default(now())
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+}
+
+model Booking {
+  id           String        @id @default(cuid())
+  callId       String        @unique
+  customerName String?
+  phone        String? // defaults to the Twilio `From` number
+  partySize    Int?
+  requestedAt  DateTime? // resolved absolute local datetime
+  requestedRaw String? // "next Friday around seven" — kept for the human caller
+  notes        String?
+  locale       String?
+  status       BookingStatus @default(PENDING_CALLBACK)
+  slots        Json // raw accumulated tool-call state
+  createdAt    DateTime      @default(now())
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+}
+
+enum CallStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  ABANDONED
+}
+
+enum BookingStatus {
+  PENDING_CALLBACK
+  CONFIRMED
+  CANCELLED
+  UNREACHABLE
+}
+
+enum Role {
+  CALLER
+  AGENT
+}

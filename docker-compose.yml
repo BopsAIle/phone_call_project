@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ai_receptionist_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: receptionist
+      POSTGRES_PASSWORD: receptionist
+      POSTGRES_DB: ai_receptionist
+    # Host port is 5433, not 5432: a locally-installed PostgreSQL service will
+    # usually already hold 5432, and on Windows both can bind it without an
+    # error — connections then silently reach the wrong server. 5433 keeps this
+    # project independent of whatever else is installed.
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Without this, `prisma migrate dev` run straight after `docker compose up -d`
+    # races the container's first-boot initialisation and fails with a connection
+    # error that looks like a configuration problem.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U receptionist -d ai_receptionist']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

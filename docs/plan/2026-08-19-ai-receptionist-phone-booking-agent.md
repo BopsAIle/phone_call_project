@@ -235,8 +235,12 @@ Modified:
 
 ### New dependencies
 
-`@nestjs/config`, `zod`, `@prisma/client`, `prisma` (dev), `openai`, `twilio`, `ws`, `@types/ws`
-(dev), `luxon`, `@types/luxon` (dev).
+`@nestjs/config`, `zod`, `@prisma/client`, `@prisma/adapter-pg`, `openai`, `twilio`, `ws`, `luxon`;
+dev: `prisma`, `dotenv`, `tsx`, `@types/ws`, `@types/luxon`.
+
+`@prisma/adapter-pg`, `dotenv`, and `tsx` are Prisma 7 requirements — a driver adapter is mandatory
+at runtime, `prisma.config.ts` loads env via `dotenv`, and the seed script needs `tsx` rather than
+`ts-node`. See [Phase 0](phases/phase-0-foundation/plan.md) for the details.
 
 ### Environment variables
 
