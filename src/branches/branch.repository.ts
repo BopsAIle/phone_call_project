@@ -78,4 +78,11 @@ export class BranchRepository {
   async countByRestaurant(restaurantId: string): Promise<number> {
     return await this.repository.count({ where: { restaurant_id: restaurantId } });
   }
+
+  async findByPhone(phone: string): Promise<Branch | null> {
+    return await this.repository.findOne({
+      where: { phone },
+      relations: { restaurant: true },
+    });
+  }
 }

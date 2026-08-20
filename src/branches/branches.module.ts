@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BranchesService } from './branches.service';
 import { BranchesController } from './branches.controller';
@@ -9,7 +9,7 @@ import { RestaurantsModule } from '../restaurants/restaurants.module';
 @Module({
   imports: [
     TypeOrmModule.forFeature([Branch]),
-    RestaurantsModule, // Import để sử dụng RestaurantsService
+    forwardRef(() => RestaurantsModule),
   ],
   controllers: [BranchesController],
   providers: [BranchesService, BranchRepository],

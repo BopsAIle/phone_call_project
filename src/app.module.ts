@@ -12,6 +12,7 @@ import {
 import { databaseConfig } from './config/database.config';
 import { RestaurantsModule } from './restaurants/restaurants.module';
 import { BranchesModule } from './branches/branches.module';
+import { BookingsModule } from './bookings/bookings.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { BranchesModule } from './branches/branches.module';
     TypeOrmModule.forRoot(databaseConfig),
     RestaurantsModule,
     BranchesModule,
+    BookingsModule,
   ],
   controllers: [AppController],
   providers: [

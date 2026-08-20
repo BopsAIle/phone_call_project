@@ -17,14 +17,19 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { RestaurantsService } from './restaurants.service';
+import { BranchesService } from '../branches/branches.service';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto';
 import { UpdateRestaurantDto } from './dto/update-restaurant.dto';
 import { Restaurant, RestaurantStatus } from './entities/restaurant.entity';
+import { Branch } from '../branches/entities/branch.entity';
 
 @ApiTags('Restaurants')
 @Controller('restaurants')
 export class RestaurantsController {
-  constructor(private readonly restaurantsService: RestaurantsService) {}
+  constructor(
+    private readonly restaurantsService: RestaurantsService,
+    private readonly branchesService: BranchesService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Tạo nhà hàng mới' })
@@ -64,6 +69,54 @@ export class RestaurantsController {
       return await this.restaurantsService.findByStatus(status);
     }
     return await this.restaurantsService.findAll();
+  }
+
+  @Get('by-hotline/:hotline')
+  @ApiOperation({
+    summary: 'Tìm nhà hàng theo hotline (dùng cho AI voice)',
+    description: 'API dùng cho AI voice assistant để query restaurant từ số hotline',
+  })
+  @ApiParam({
+    name: 'hotline',
+    description: 'Số hotline của nhà hàng (phone field)',
+    example: '0243123456',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Thông tin nhà hàng',
+    type: Restaurant,
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Không tìm thấy nhà hàng với hotline này',
+  })
+  async findByHotline(@Param('hotline') hotline: string): Promise<Restaurant> {
+    return await this.restaurantsService.findByPhone(hotline);
+  }
+
+  @Get(':id/branches')
+  @ApiOperation({
+    summary: 'Lấy danh sách chi nhánh của nhà hàng (dùng cho AI voice)',
+    description: 'API dùng cho AI voice assistant để query branches sau khi có restaurant_id',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'UUID của nhà hàng',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Danh sách chi nhánh',
+    type: [Branch],
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Không tìm thấy nhà hàng',
+  })
+  async getBranchesOfRestaurant(@Param('id') id: string): Promise<Branch[]> {
+    // Validate restaurant exists
+    await this.restaurantsService.findOne(id);
+    return await this.branchesService.findByRestaurant(id);
   }
 
   @Get(':id')

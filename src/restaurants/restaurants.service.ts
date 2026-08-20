@@ -56,4 +56,14 @@ export class RestaurantsService {
   async findByStatus(status: string): Promise<Restaurant[]> {
     return await this.restaurantRepository.findByStatus(status as any);
   }
+
+  async findByPhone(phone: string): Promise<Restaurant> {
+    const restaurant = await this.restaurantRepository.findByPhone(phone);
+
+    if (!restaurant) {
+      throw new NotFoundException(`Không tìm thấy nhà hàng với hotline ${phone}`);
+    }
+
+    return restaurant;
+  }
 }

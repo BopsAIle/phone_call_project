@@ -58,4 +58,11 @@ export class RestaurantRepository {
     const count = await this.repository.count({ where });
     return count > 0;
   }
+
+  async findByPhone(phone: string): Promise<Restaurant | null> {
+    return await this.repository.findOne({
+      where: { phone },
+      relations: { branches: true },
+    });
+  }
 }

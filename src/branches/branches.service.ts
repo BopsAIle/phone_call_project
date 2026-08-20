@@ -72,4 +72,8 @@ export class BranchesService {
   async getRestaurantBranchCount(restaurantId: string): Promise<number> {
     return await this.branchRepository.countByRestaurant(restaurantId);
   }
+
+  async findByPhone(phone: string): Promise<Branch | null> {
+    return await this.branchRepository.findByPhone(phone);
+  }
 }

@@ -23,6 +23,7 @@ async function bootstrap() {
     .setVersion('1.0')
     .addTag('Restaurants')
     .addTag('Branches')
+    .addTag('Bookings')
     .build();
   
   const document = SwaggerModule.createDocument(app, config);
