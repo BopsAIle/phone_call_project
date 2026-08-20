@@ -20,7 +20,9 @@ document below covers the *how* for one phase and assumes that context.
 
 - **Phases are strictly ordered.** Each depends on the one before it. Do not start Phase 3 because
   Phase 2 is "nearly done" — the demo criterion is the gate.
-- **Each phase gets its own branch** off `feat/ai-receptionist`, named in its plan document.
+- **Each phase gets its own branch**, named in its plan document, cut from the previous phase's
+  branch (or from `master` once that branch has merged). Phase 0 shipped on `feat/foundation` off
+  `master`; Phase 1 cuts `feat/twilio-media-stream` from there.
 - **The demo criterion is the definition of done**, not "the code is written". If you cannot
   demonstrate it, the phase is not finished.
 - **These are living documents.** When the implementation deviates, update the phase plan and the

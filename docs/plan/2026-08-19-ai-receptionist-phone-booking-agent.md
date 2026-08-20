@@ -123,7 +123,8 @@ agent talks over interruptions and the call feels broken.
 **Latency budget** (target < 1.5 s): VAD endpointing ~500 ms, LLM first token ~400 ms, TTS first
 audio ~300 ms. Mitigated by streaming LLM output into TTS **sentence by sentence** rather than
 awaiting the full completion, and by keeping the system prompt short. Per-stage timings are recorded
-in `Utterance.latencyMs` from Phase 1 — we cannot tune what we do not measure.
+in `Utterance.latencyMs` from Phase 2, once there are utterances to attach them to — we cannot tune
+what we do not measure.
 
 ### Verified vendor facts
 
@@ -131,7 +132,10 @@ Confirmed against current provider documentation on 2026-08-19. These drive the 
 substitute remembered values.
 
 - **Twilio Media Streams** — 8 kHz G.711 mu-law, mono, base64, 20 ms frames (160 bytes). Inbound
-  events `connected` / `start` / `media` / `stop` / `mark`. The only messages Twilio accepts *from*
+  events `connected` / `start` / `media` / `mark` / `dtmf` / `stop`. The `start` event carries
+  `streamSid`, `callSid`, `mediaFormat`, and `customParameters` — but **not** the caller's number, so
+  the `Call` row is created by the voice webhook, which has `From` and `To`. The only messages Twilio
+  accepts *from*
   us are `media`, `mark`, and `clear`. `clear` flushes Twilio's buffered outbound audio and is the
   barge-in primitive; `mark` echoes back when a chunk finishes playing, which is how we know the
   agent actually stopped talking. Requires `<Connect><Stream>`, not `<Start><Stream>`.
@@ -174,8 +178,9 @@ are the index, not the instructions.
    missing keys), Prisma + the schema below, `docker-compose.yml` for Postgres, `PrismaService`,
    health endpoint, and the three provider interfaces. No AI yet. Request the German phone number
    now — provisioning takes days.
-2. [ ] **[Phase 1 — Audio path](phases/phase-1-audio-path/plan.md).** Twilio webhook returns `<Connect><Stream>`; the gateway accepts the
-   WS, parses `start`/`media`/`stop`, and persists a `Call` row. Ship the mu-law codec and resampler
+2. [ ] **[Phase 1 — Audio path](phases/phase-1-audio-path/plan.md).** The Twilio webhook persists the
+   `Call` row and returns `<Connect><Stream>`; the gateway accepts the WS and parses
+   `start`/`media`/`stop`. Ship the mu-law codec and resampler
    **with unit tests**. Build the offline replay harness here. *Demo: call the number and hear your
    own voice echoed back.* This phase de-risks the project — if audio is clean here, the rest is
    application logic.
