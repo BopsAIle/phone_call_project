@@ -4,7 +4,12 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 
-describe('AppController (e2e)', () => {
+/**
+ * Boots the full AppModule, so it needs a valid .env and a reachable Postgres
+ * (`docker compose up -d`). PrismaService connects fail-fast at boot, so
+ * without the database this suite fails during `app.init()`.
+ */
+describe('HealthController (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeEach(async () => {
@@ -16,11 +21,11 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
-  it('/ (GET)', () => {
+  it('/health (GET)', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/health')
       .expect(200)
-      .expect('Hello World!');
+      .expect({ status: 'ok', database: 'up' });
   });
 
   afterEach(async () => {

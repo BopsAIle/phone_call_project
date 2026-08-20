@@ -16,7 +16,8 @@ workflow, or run `/feature-doc <feature-name>` to scaffold them.
 
 <!-- Add one line per feature: - [Feature name](features/<feature-slug>.md) — one-line summary -->
 
-_No features documented yet._
+- [Phase 0 — Foundation](features/phase-0-foundation.md) — validated configuration, Postgres and the
+  full Prisma schema, `GET /health`, and the STT/LLM/TTS provider interfaces.
 
 ## Plans
 
