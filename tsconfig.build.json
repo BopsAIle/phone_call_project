@@ -1,5 +1,12 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Inside dist/ so nest-cli's `deleteOutDir` clears it along with the output.
+    // Left at the default it outlives the deletion, and the next build with
+    // unchanged sources decides it is up to date and emits *nothing* — leaving
+    // no dist/main.js at all, from a command that exits 0.
+    "tsBuildInfoFile": "./dist/tsconfig.build.tsbuildinfo"
+  },
   "exclude": [
     "node_modules",
     "test",
