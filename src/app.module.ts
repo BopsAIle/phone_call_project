@@ -10,6 +10,7 @@ import {
   AllExceptionsFilter,
 } from './common';
 import { databaseConfig } from './config/database.config';
+import { RestaurantsModule } from './restaurants/restaurants.module';
 
 @Module({
   imports: [
@@ -17,7 +18,8 @@ import { databaseConfig } from './config/database.config';
       isGlobal: true,
       envFilePath: '.env',
     }),
-    // TypeOrmModule.forRoot(databaseConfig), // Tạm comment để chạy
+    TypeOrmModule.forRoot(databaseConfig),
+    RestaurantsModule,
   ],
   controllers: [AppController],
   providers: [
