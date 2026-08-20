@@ -11,6 +11,7 @@ import {
 } from './common';
 import { databaseConfig } from './config/database.config';
 import { RestaurantsModule } from './restaurants/restaurants.module';
+import { BranchesModule } from './branches/branches.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { RestaurantsModule } from './restaurants/restaurants.module';
     }),
     TypeOrmModule.forRoot(databaseConfig),
     RestaurantsModule,
+    BranchesModule,
   ],
   controllers: [AppController],
   providers: [

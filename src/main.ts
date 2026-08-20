@@ -22,6 +22,7 @@ async function bootstrap() {
     .setDescription('API quản lý nhà hàng với AI')
     .setVersion('1.0')
     .addTag('Restaurants')
+    .addTag('Branches')
     .build();
   
   const document = SwaggerModule.createDocument(app, config);

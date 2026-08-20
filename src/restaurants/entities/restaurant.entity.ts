@@ -4,6 +4,7 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  OneToMany,
 } from 'typeorm';
 
 export enum RestaurantStatus {
@@ -34,4 +35,11 @@ export class Restaurant {
 
   @UpdateDateColumn({ type: 'timestamp' })
   updated_at: Date;
+
+  // Relations
+  @OneToMany(() => Branch, (branch) => branch.restaurant)
+  branches: Branch[];
 }
+
+// Import Branch ở đây để tránh circular dependency
+import { Branch } from '../../branches/entities/branch.entity';
