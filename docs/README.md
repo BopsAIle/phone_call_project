@@ -18,6 +18,9 @@ workflow, or run `/feature-doc <feature-name>` to scaffold them.
 
 - [Phase 0 — Foundation](features/phase-0-foundation.md) — validated configuration, Postgres and the
   full Prisma schema, `GET /health`, and the STT/LLM/TTS provider interfaces.
+- [Phase 1 — Audio path](features/phase-1-audio-path.md) — Twilio voice webhook and Media Streams
+  gateway, the mu-law codec and anti-aliased resampler, `Call` persistence, and the offline replay
+  harness.
 
 ## Plans
 
