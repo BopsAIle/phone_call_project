@@ -1,6 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    // Pinned, not inferred. tsc otherwise derives rootDir from the longest
+    // common path of its inputs, so a single .ts file outside src/ silently
+    // moves the entry point to dist/src/main.js and breaks `node dist/main`.
+    "rootDir": "src",
     // Inside dist/ so nest-cli's `deleteOutDir` clears it along with the output.
     // Left at the default it outlives the deletion, and the next build with
     // unchanged sources decides it is up to date and emits *nothing* — leaving
@@ -11,6 +15,8 @@
     "node_modules",
     "test",
     "dist",
+    "client",
+    "scripts",
     "**/*spec.ts",
     "prisma",
     "prisma.config.ts"

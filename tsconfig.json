@@ -21,5 +21,10 @@
     "noImplicitAny": false,
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false
-  }
+  },
+  // Browser code lives under client/ and is owned by client/tsconfig.json. It
+  // needs DOM and AudioWorklet globals and a bundler module resolution, none of
+  // which belong in the server project — and leaving it in here would also drag
+  // it into `nest build`.
+  "exclude": ["client", "dist", "node_modules"]
 }

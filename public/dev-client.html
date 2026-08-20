@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Media stream dev client</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1a1a1a;
+        --muted: #6b6b6b;
+        --bg: #fafafa;
+        --card: #ffffff;
+        --line: #e2e2e2;
+        --live: #197a3d;
+        --error: #b3261e;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #ededed;
+          --muted: #9a9a9a;
+          --bg: #161616;
+          --card: #1f1f1f;
+          --line: #333333;
+          --live: #63d68d;
+          --error: #f2b8b5;
+        }
+      }
+
+      body {
+        margin: 0;
+        padding: 3rem 1.5rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif;
+        display: flex;
+        justify-content: center;
+      }
+
+      main {
+        width: 100%;
+        max-width: 34rem;
+      }
+
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 0.25rem;
+      }
+
+      .lede {
+        margin: 0 0 2rem;
+        color: var(--muted);
+      }
+
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 1.25rem;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+
+      button {
+        font: inherit;
+        padding: 0.5rem 1rem;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--bg);
+        color: var(--fg);
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: var(--muted);
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      #call {
+        font-weight: 600;
+      }
+
+      #status {
+        margin: 0;
+        font-weight: 500;
+      }
+
+      #status[data-tone='live'] {
+        color: var(--live);
+      }
+
+      #status[data-tone='error'] {
+        color: var(--error);
+      }
+
+      #frames {
+        margin: 0.35rem 0 0;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85rem;
+      }
+
+      .note {
+        margin: 1.5rem 0 0;
+        padding-left: 1.1rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .note li + li {
+        margin-top: 0.4rem;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Media stream dev client</h1>
+      <p class="lede">
+        Speaks Twilio's Media Streams protocol at <code>/media-stream</code>.
+        Click Call, talk, and you should hear yourself.
+      </p>
+
+      <div class="panel">
+        <div class="controls">
+          <button id="call" type="button">Call</button>
+          <button id="hangup" type="button">Hang up</button>
+          <button id="mark" type="button">Send mark</button>
+          <button id="clear" type="button">Send clear</button>
+        </div>
+        <p id="status" data-tone="idle">Loading…</p>
+        <p id="frames"></p>
+      </div>
+
+      <ul class="note">
+        <li>
+          <strong>Use headphones.</strong> The echo feeds straight back into the
+          microphone otherwise, and it howls within a second or two.
+        </li>
+        <li>
+          Reach this page over <code>localhost</code>. A LAN IP is not a secure
+          context, so the microphone is unavailable there.
+        </li>
+        <li>
+          Send mark and Send clear ask the server to push those frames into the
+          live stream, so both protocol paths are exercised before a real call.
+        </li>
+      </ul>
+    </main>
+
+    <script type="module" src="/dev/assets/main.js"></script>
+  </body>
+</html>
