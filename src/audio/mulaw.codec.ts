@@ -75,8 +75,15 @@ export function pcm16ToMulaw(sample: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-/** A buffer of mu-law bytes to 16-bit PCM, one sample per input byte. */
-export function decodeMulaw(mulaw: Buffer): Int16Array {
+/**
+ * A buffer of mu-law bytes to 16-bit PCM, one sample per input byte.
+ *
+ * Takes `Uint8Array` rather than `Buffer` so the browser dev client can call
+ * this exact function instead of reimplementing the loop. `Buffer` *is* a
+ * `Uint8Array` and the body only uses `.length` and index access, so widening
+ * the parameter leaves every existing caller alone.
+ */
+export function decodeMulaw(mulaw: Uint8Array): Int16Array {
   const pcm = new Int16Array(mulaw.length);
 
   for (let i = 0; i < mulaw.length; i++) {
@@ -86,7 +93,16 @@ export function decodeMulaw(mulaw: Buffer): Int16Array {
   return pcm;
 }
 
-/** 16-bit PCM to mu-law, one output byte per input sample. */
+/**
+ * 16-bit PCM to mu-law, one output byte per input sample.
+ *
+ * The mirror of `decodeMulaw` cannot be shared with the browser, and the
+ * obstacle is `Buffer.allocUnsafe` below — not the return type. Changing the
+ * signature to `Uint8Array` would look like it unblocked sharing and would
+ * instead move the failure to runtime, so the client loops `pcm16ToMulaw`
+ * itself. That scalar function is the part that could be subtly wrong; a loop
+ * around it cannot meaningfully diverge.
+ */
 export function encodeMulaw(pcm: Int16Array): Buffer {
   const mulaw = Buffer.allocUnsafe(pcm.length);
 

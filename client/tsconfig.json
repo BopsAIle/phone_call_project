@@ -1,0 +1,26 @@
+{
+  // Owns the browser dev client. esbuild does not type-check, so this file
+  // exists for the editor and for eslint's projectService — it is the only
+  // thing that makes `client/` type-check correctly, and it emits nothing.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // The root config is nodenext, which demands explicit .js extensions on
+    // relative ESM imports. The codec is imported as '../src/audio/mulaw.codec',
+    // so this only resolves under bundler — matching what esbuild actually does.
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    // "node" is here only because the shared codec module declares Buffer in
+    // encodeMulaw, which the browser never calls and esbuild tree-shakes away.
+    // Without it, type-checking mulaw.codec.ts from this project fails on a
+    // function we do not use.
+    "types": ["audioworklet", "node"],
+    "noEmit": true,
+    "incremental": false
+  },
+  // Both must be explicit: `extends` would otherwise inherit the root's
+  // "exclude": ["client", ...], which resolves relative to the root config and
+  // would exclude every file in this project.
+  "include": ["**/*.ts"],
+  "exclude": []
+}
