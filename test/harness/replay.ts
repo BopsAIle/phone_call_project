@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { randomBytes } from 'crypto';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { WebSocket } from 'ws';
 import {
   MULAW_FRAME_BYTES,
@@ -9,6 +10,7 @@ import {
   encodeMulaw,
 } from '../../src/audio/mulaw.codec';
 import { Downsampler } from '../../src/audio/resampler';
+import { PrismaClient } from '../../src/generated/prisma/client';
 import { parseInboundFrame } from '../../src/telephony/twilio-frames';
 import { readWav, writeWav } from './wav';
 
@@ -27,12 +29,27 @@ import { readWav, writeWav } from './wav';
  * Phase 2 that matters — server-side VAD endpointing and barge-in are timing
  * behaviour, and a stream delivered all at once does not test either. Pass
  * `--fast` to skip the pacing when only the audio path is in question.
+ *
+ * Since Phase 2 it also prints the transcript the call produced, read from the
+ * `Utterance` rows rather than from the server's log, so a WAV fixture is a
+ * repeatable accuracy check. Note that `--fast` makes the transcript
+ * meaningless: VAD needs real time to endpoint on.
  */
 
 const FRAME_INTERVAL_MS = 20;
 
 /** How long to keep listening after the last frame, for audio still in flight. */
 const DRAIN_MS = 500;
+
+/**
+ * How long to wait for transcription to catch up after the audio has stopped.
+ *
+ * The last utterance cannot be final until server VAD has seen its
+ * `silence_duration_ms` of quiet, and the `.completed` event lands after that
+ * again. Cutting this short reads as "the harness lost the last sentence" when
+ * the pipeline was simply still working.
+ */
+const TRANSCRIPT_SETTLE_MS = 2500;
 
 interface StreamTarget {
   url: string;
@@ -103,6 +120,47 @@ function sleepUntil(deadline: number): Promise<void> {
   return new Promise((resolve) =>
     setTimeout(resolve, Math.max(0, deadline - Date.now())),
   );
+}
+
+/**
+ * Reads back what the call actually transcribed.
+ *
+ * Goes to the database rather than scraping the server's log, because the rows
+ * are the thing later phases consume — this checks the transcript *and* that it
+ * was persisted, which is the demo criterion in full. The harness is a separate
+ * process, so it opens its own client the way prisma/seed.ts does.
+ */
+async function readTranscript(callId: string): Promise<void> {
+  const prisma = new PrismaClient({
+    adapter: new PrismaPg({ connectionString: requireEnv('DATABASE_URL') }),
+  });
+
+  try {
+    const utterances = await prisma.utterance.findMany({
+      where: { callId },
+      orderBy: { startMs: 'asc' },
+    });
+
+    if (utterances.length === 0) {
+      console.log(
+        '\nNo utterances. Either nothing was said, or transcription is not ' +
+          'running — check the server log for a realtime socket error.',
+      );
+      return;
+    }
+
+    console.log(`\nTranscript (${utterances.length} utterances):`);
+
+    for (const utterance of utterances) {
+      const end = utterance.endMs ?? utterance.startMs;
+      console.log(
+        `  [${(utterance.startMs / 1000).toFixed(1)}s–${(end / 1000).toFixed(1)}s] ` +
+          `${utterance.role}: ${utterance.text}`,
+      );
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
 }
 
 async function main(): Promise<void> {
@@ -206,6 +264,12 @@ async function main(): Promise<void> {
 
   await sleepUntil(Date.now() + DRAIN_MS);
 
+  // Before `stop`, so the last utterance can finalise while the session is
+  // still open. Closing first would cut server VAD off mid-endpointing and lose
+  // the final sentence — which looks exactly like a transcription bug.
+  console.log(`Waiting ${TRANSCRIPT_SETTLE_MS}ms for transcription to settle…`);
+  await sleepUntil(Date.now() + TRANSCRIPT_SETTLE_MS);
+
   socket.send(
     JSON.stringify({
       event: 'stop',
@@ -228,6 +292,9 @@ async function main(): Promise<void> {
     `Received ${Math.round(returned.length / MULAW_FRAME_BYTES)} frames (${returned.length} bytes)`,
   );
   console.log(`Wrote    ${outputPath} — listen to it`);
+
+  const callId = target.parameters.callId;
+  if (callId) await readTranscript(callId);
 }
 
 main().catch((error: unknown) => {

@@ -79,17 +79,27 @@ and is not sent on GA. `OpenAI-Safety-Identifier` is optional.
           "languages": ["en"],
           "delay": "low"
         },
-        "turn_detection": {
-          "type": "server_vad",
-          "threshold": 0.5,
-          "prefix_padding_ms": 300,
-          "silence_duration_ms": 500
-        }
+        "turn_detection": null
       }
     }
   }
 }
 ```
+
+> **Corrected against a live session, 2026-08-21.** This document previously
+> specified a `server_vad` turn-detection block. `gpt-live-transcribe` rejects it:
+>
+> ```
+> Realtime API error: Turn detection is not supported for this transcription
+> model. (invalid_value)
+> ```
+>
+> Turn-detection support depends on the transcription model, and this one chunks
+> audio itself. The failure is worth understanding because it is quiet: the
+> socket opens, `session.update` is rejected as a whole, and the session then
+> transcribes nothing — it looks like silence, not like a configuration error.
+> `null` is sent explicitly rather than the key being omitted, matching the
+> documented example for this model.
 
 The GA API requires this **nested** `session.audio.input` object and rejects the older flat
 `input_audio_format` / `input_audio_transcription` keys. `audio/pcm` @ 24000 is the documented,
@@ -110,16 +120,18 @@ Three fields the original draft of this plan did not know about:
 
 **Appending audio:** `{ "type": "input_audio_buffer.append", "audio": "<base64 PCM16LE>" }`.
 
-Let **server-side VAD** do turn detection. Writing our own energy-gate endpointing means tuning
-thresholds against phone noise, hold music, and background chatter — a solved problem we should not
-re-solve. Note that in a transcription session VAD only controls how audio is *chunked*; it does not
+Let the **model** do turn detection. Writing our own energy-gate endpointing means tuning thresholds
+against phone noise, hold music, and background chatter — a solved problem we should not re-solve.
+Note that in a transcription session turn detection only controls how audio is *chunked*; it does not
 trigger a response the way it does in a speech-to-speech session.
 
-**Two claims to verify by logging the first raw frames of the first live session**, rather than by
-trusting this document: the `?intent=transcription` query form, and the presence of
-`audio_start_ms` / `audio_end_ms` on the VAD events. Both have a graceful fallback — the session type
-is also set by `session.update`, and timing falls back to the local audio clock below. If either
-differs in practice, fix the code *and* this file in the same commit.
+**Verified against a live session:** `?intent=transcription` with a bearer header connects, and the
+`session.update` above is accepted. Confirmed by the API rejecting the *previous* config on its
+merits — a parameter-level complaint proves the URL, the auth, and the session type all landed.
+
+**Still open — and it matters more than the rest of this phase.** With no VAD block, it is not yet
+established that `input_audio_buffer.speech_started` / `speech_stopped` are emitted at all. See
+"The barge-in signal" below.
 
 ### Audio path into the session
 
@@ -165,6 +177,27 @@ and says what it means.
 
 Persist only **final** transcripts as `Utterance` rows. Partials revise themselves several times per
 sentence and would turn the table into noise.
+
+### The barge-in signal
+
+This phase exists to produce two things, and `onSpeechStarted` is the one Phase 3 cannot work
+around. Losing the VAD block puts it in question: if the model does its own chunking, it may not
+report speech boundaries as discrete events at all.
+
+Resolve it by reading the event vocabulary off a live session — the session logs every unrecognised
+event type at `debug`, so one run enumerates what actually arrives. Three outcomes:
+
+1. **`speech_started` / `speech_stopped` still arrive.** Nothing to do; the design stands.
+2. **Boundaries arrive under different event names.** Add them to the union and map them.
+3. **No boundary events at all.** Then Phase 2 owes Phase 3 a substitute, and the cheapest honest one
+   is a *transcript-activity* gate: the first `delta` after a quiet gap means the caller has started
+   talking. That is later than a true VAD edge — it waits for the first decoded word rather than the
+   first energy — so barge-in would feel slower, and the gap needs measuring before Phase 3 commits
+   to it. Do not reach for a hand-rolled energy gate first; it is the option this plan has twice
+   argued against.
+
+Whichever it is, record it here and fix the design before Phase 3 starts. Discovering it there means
+discovering it inside the phase that depends on it.
 
 ### Timing and latency
 

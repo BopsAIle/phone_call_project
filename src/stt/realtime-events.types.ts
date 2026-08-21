@@ -184,6 +184,22 @@ export interface TurnDetectionConfig {
   silenceDurationMs: number;
 }
 
+/**
+ * `null` means "let the model chunk the audio itself".
+ *
+ * Turn-detection support depends on the transcription model, and
+ * `gpt-live-transcribe` does **not** accept it — a `server_vad` block comes
+ * back as `Turn detection is not supported for this transcription model.
+ * (invalid_value)`, verified against a live session on 2026-08-21. The
+ * documented example for this model sends `null` explicitly, so we do too
+ * rather than omitting the key.
+ *
+ * The shape is kept because other transcription models do support it, and
+ * because this is the knob Phase 6 would reach for if endpointing ever needs
+ * tuning against real phone noise.
+ */
+export type TurnDetection = TurnDetectionConfig | null;
+
 export interface SessionConfig {
   model: string;
   /**
@@ -198,7 +214,7 @@ export interface SessionConfig {
    * `"low"` is the documented example and our default.
    */
   delay: string;
-  turnDetection: TurnDetectionConfig;
+  turnDetection: TurnDetection;
 }
 
 /**
@@ -223,7 +239,7 @@ export function sessionUpdate(config: SessionConfig): string {
             languages: config.languages,
             delay: config.delay,
           },
-          turn_detection: {
+          turn_detection: config.turnDetection && {
             type: 'server_vad',
             threshold: config.turnDetection.threshold,
             prefix_padding_ms: config.turnDetection.prefixPaddingMs,

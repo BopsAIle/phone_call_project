@@ -6,15 +6,12 @@ import {
   type SessionConfig,
 } from './realtime-events.types';
 
+/** What we actually send: gpt-live-transcribe rejects turn detection. */
 const config: SessionConfig = {
   model: 'gpt-live-transcribe',
   languages: ['en'],
   delay: 'low',
-  turnDetection: {
-    threshold: 0.5,
-    prefixPaddingMs: 300,
-    silenceDurationMs: 500,
-  },
+  turnDetection: null,
 };
 
 describe('parseServerEvent', () => {
@@ -189,6 +186,44 @@ describe('sessionUpdate', () => {
               languages: ['en'],
               delay: 'low',
             },
+            turn_detection: null,
+          },
+        },
+      },
+    });
+  });
+
+  /**
+   * Verified against a live session: `gpt-live-transcribe` answers a
+   * `server_vad` block with `Turn detection is not supported for this
+   * transcription model. (invalid_value)`, and the whole `session.update` is
+   * rejected — so the session opens and then transcribes nothing.
+   *
+   * `null` is sent explicitly rather than the key being omitted, matching the
+   * documented example for this model.
+   */
+  it('sends turn_detection as an explicit null for a model that rejects it', () => {
+    const raw = sessionUpdate(config);
+
+    expect(raw).toContain('"turn_detection":null');
+    expect(raw).not.toContain('server_vad');
+  });
+
+  /** The shape still works for models that do accept it. */
+  it('serialises turn detection when one is configured', () => {
+    const raw = sessionUpdate({
+      ...config,
+      turnDetection: {
+        threshold: 0.5,
+        prefixPaddingMs: 300,
+        silenceDurationMs: 500,
+      },
+    });
+
+    expect(JSON.parse(raw)).toMatchObject({
+      session: {
+        audio: {
+          input: {
             turn_detection: {
               type: 'server_vad',
               threshold: 0.5,

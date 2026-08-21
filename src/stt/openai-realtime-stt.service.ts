@@ -14,6 +14,7 @@ import {
   sessionUpdate,
   type SessionConfig,
   type ServerEvent,
+  type TurnDetection,
 } from './realtime-events.types';
 
 /**
@@ -47,11 +48,16 @@ const SOCKET_BUFFER_CAP_BYTES = 256 * 1024;
 /** Three attempts, then give up and let the call continue without transcription. */
 const RECONNECT_BACKOFF_MS = [200, 500, 1000];
 
-const VAD_DEFAULTS = {
-  threshold: 0.5,
-  prefixPaddingMs: 300,
-  silenceDurationMs: 500,
-};
+/**
+ * `gpt-live-transcribe` chunks audio itself and rejects an explicit
+ * `turn_detection` block outright — see the `TurnDetection` type. Sending one
+ * fails the whole `session.update`, so the session opens and then transcribes
+ * nothing.
+ *
+ * Kept as a named constant rather than inlined so that the day a model does
+ * accept VAD, this is the single line to change.
+ */
+const TURN_DETECTION: TurnDetection = null;
 
 /** Latency against word error rate. See the phase plan; may want raising on real phone audio. */
 const TRANSCRIPTION_DELAY = 'low';
@@ -68,7 +74,12 @@ export interface RealtimeSocket {
   send(data: string): void;
   close(): void;
   terminate(): void;
-  on(event: string, listener: (...args: never[]) => void): unknown;
+  /**
+   * Declared as a method rather than a property so parameter checking stays
+   * bivariant — that is what lets both `ws`'s overloaded `on` and a handler
+   * typed `(raw: Buffer) => void` satisfy the same signature.
+   */
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
   removeAllListeners(): unknown;
 }
 
@@ -445,7 +456,7 @@ export class OpenAiRealtimeSttService implements SttProvider {
       model: this.config.get('STT_MODEL', { infer: true }),
       languages: [locale],
       delay: TRANSCRIPTION_DELAY,
-      turnDetection: VAD_DEFAULTS,
+      turnDetection: TURN_DETECTION,
     };
 
     const session = new OpenAiSttSession(

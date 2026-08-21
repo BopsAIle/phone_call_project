@@ -9,11 +9,8 @@ const CONFIG: SessionConfig = {
   model: 'gpt-live-transcribe',
   languages: ['en'],
   delay: 'low',
-  turnDetection: {
-    threshold: 0.5,
-    prefixPaddingMs: 300,
-    silenceDurationMs: 500,
-  },
+  // gpt-live-transcribe chunks audio itself and rejects an explicit block.
+  turnDetection: null,
 };
 
 const CONNECTING = 0;
@@ -46,7 +43,7 @@ class FakeSocket implements RealtimeSocket {
   bufferedAmount = 0;
   readonly sent: string[] = [];
 
-  private listeners = new Map<string, ((...args: never[]) => void)[]>();
+  private listeners = new Map<string, ((...args: unknown[]) => void)[]>();
 
   send(data: string): void {
     this.sent.push(data);
@@ -60,7 +57,7 @@ class FakeSocket implements RealtimeSocket {
     this.readyState = CLOSED;
   }
 
-  on(event: string, listener: (...args: never[]) => void): this {
+  on(event: string, listener: (...args: unknown[]) => void): this {
     const existing = this.listeners.get(event) ?? [];
     this.listeners.set(event, [...existing, listener]);
     return this;
