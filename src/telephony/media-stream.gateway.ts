@@ -1,6 +1,8 @@
 import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import type { Server } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
+import type { CallSession } from '../conversation/call-session';
+import { ConversationService } from '../conversation/conversation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CallStatus } from '../generated/prisma/enums';
 import { MEDIA_STREAM_PATH } from './twiml.service';
@@ -23,6 +25,14 @@ interface MediaStreamSession {
   callId?: string;
   /** From the `Call` row, so the `stop` path can compute a duration without a read. */
   startedAt?: Date;
+  /**
+   * Held directly rather than looked up per frame.
+   *
+   * A map lookup 50 times a second per call is the smaller reason; the real one
+   * is that it makes the "no conversation yet" window explicit at the one place
+   * that has to tolerate it.
+   */
+  conversation?: CallSession;
   framesIn: number;
   framesOut: number;
 }
@@ -35,9 +45,14 @@ interface MediaStreamSession {
  * a `{ event, data }` envelope while Twilio sends `{ event, media: {...} }` —
  * the payload is a sibling of `event`, not nested under `data`.
  *
- * In this phase the pipeline is an echo: every inbound `media` frame goes
- * straight back out. Nothing here decodes audio, so a bad echo means a
- * transport bug, never a codec one.
+ * Inbound `media` frames now *fork*: each one goes to the conversation layer
+ * for transcription and also straight back out as the Phase 1 echo. The echo
+ * stays until Phase 3 has real speech to play, because it is the only outbound
+ * audio there is — removing it would leave the dev client and the replay
+ * harness silent through exactly the phase that needs their feedback.
+ *
+ * Nothing in the echo path decodes audio, so a bad echo still means a transport
+ * bug and never a codec one.
  */
 @Injectable()
 export class MediaStreamGateway implements BeforeApplicationShutdown {
@@ -46,7 +61,10 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
   private readonly byStreamSid = new Map<string, MediaStreamSession>();
   private server?: WebSocketServer;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly conversations: ConversationService,
+  ) {}
 
   /**
    * Called from `main.ts` once the HTTP server is listening.
@@ -145,7 +163,13 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
       case 'media':
         session.framesIn++;
         if (session.streamSid) {
-          // The echo. Phase 2 forks here into decode → upsample → STT.
+          // The fork. Decode → upsample → STT happens inside the conversation's
+          // STT session, which takes the frame exactly as Twilio sent it.
+          session.conversation?.pushAudio(
+            Buffer.from(frame.media.payload, 'base64'),
+          );
+
+          // The Phase 1 echo, until Phase 3 has something better to say.
           this.send(
             session,
             mediaMessage(session.streamSid, frame.media.payload),
@@ -202,6 +226,25 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
 
     session.callId = callId;
 
+    // Before the database write, deliberately. This resolves in a microtask —
+    // the STT session buffers while its socket connects — whereas the `update`
+    // below is a round trip. Opening the conversation second would drop the
+    // frames that arrive during it, and those are the first frames of the call.
+    try {
+      session.conversation = await this.conversations.create({
+        callId,
+        streamSid,
+      });
+    } catch (error: unknown) {
+      // Audio beats transcription: a call that cannot be transcribed is worth
+      // far more than a call that does not connect.
+      this.logger.error(
+        `Could not open a conversation for call ${callId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
     try {
       const call = await this.prisma.call.update({
         where: { id: callId },
@@ -232,7 +275,14 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
   ): Promise<void> {
     if (!this.sessions.delete(session.socket)) return;
 
-    if (session.streamSid) this.byStreamSid.delete(session.streamSid);
+    if (session.streamSid) {
+      this.byStreamSid.delete(session.streamSid);
+
+      // Closes the OpenAI socket and flushes the last partial batch of audio,
+      // which is where the caller's final word usually is.
+      await this.conversations.destroy(session.streamSid);
+      session.conversation = undefined;
+    }
 
     this.logger.log(
       `Stream ${session.streamSid ?? '(unstarted)'} ended after ${session.framesIn} frames in, ${session.framesOut} out`,

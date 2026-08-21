@@ -24,5 +24,13 @@ export interface SttSession {
 }
 
 export interface SttProvider {
-  createSession(opts: { locale?: 'en' | 'de' }): Promise<SttSession>;
+  /**
+   * `callId` is for log correlation only — never a lookup key. Without it a
+   * mid-call transcription error is a line that cannot be tied to a call, which
+   * is exactly the line you need when one caller in twenty reports silence.
+   */
+  createSession(opts: {
+    locale?: 'en' | 'de';
+    callId?: string;
+  }): Promise<SttSession>;
 }
