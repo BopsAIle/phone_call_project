@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import type { LogLevel } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
@@ -10,8 +11,26 @@ import {
 } from './dev/dev-client.enabled';
 import { MediaStreamGateway } from './telephony/media-stream.gateway';
 
+/**
+ * Transcripts are personal data, and from Phase 2 they are logged at `debug`.
+ *
+ * Nest's default enables every level, which would make "debug only" a comment
+ * rather than a control — the caller's words would go to the production log in
+ * full. Silencing `debug` and `verbose` outside development is what makes the
+ * distinction real. Phase 6 owns retention for the stored rows.
+ */
+function logLevels(): LogLevel[] {
+  const base: LogLevel[] = ['log', 'warn', 'error', 'fatal'];
+
+  return process.env.NODE_ENV === 'production'
+    ? base
+    : [...base, 'debug', 'verbose'];
+}
+
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger: logLevels(),
+  });
 
   // Same gate as the DevModule import in app.module.ts. Gating only the module
   // would leave the bundle served in production: /dev would 404 while
