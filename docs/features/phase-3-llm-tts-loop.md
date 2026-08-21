@@ -117,6 +117,17 @@ state. That is what prevents the classic overlapping-replies failure.
 window would add its full duration to *every* turn against an already-missed budget, to fix a case
 that is the exception. Restarting costs one wasted partial completion, and only when it happens.
 
+**Turn boundaries are ours, because the model has none.** `gpt-live-transcribe` emits only deltas —
+no `speech_started`, no `speech_stopped`, no `.completed`. `OpenAiSttSession` therefore endpoints on
+the transcript going quiet for 1200 ms, and the joined deltas are the transcript. The audio buffer is
+deliberately **not** committed: committing closes the item over whatever has been decoded so far, and
+this model runs seconds behind the audio, so it discards words. Details and measurements are in the
+plan.
+
+**Barge-in only fires while `SPEAKING`.** Because the signal is transcript activity rather than a VAD
+edge, "speech started" during `THINKING` nearly always means the caller's own sentence continuing
+past a pause the endpointer called early — and no audio is playing to interrupt.
+
 **`toolCalls` always settles, never rejects.** Breaking out of the `for await` on barge-in calls
 `.return()` on the generator, which unwinds its `finally`. A rejection nobody is awaiting is an
 unhandled rejection, and that ends the process along with every other live call. Phase 4 is the phase
@@ -135,27 +146,42 @@ so iteration does not go through real calls.
 
 ## Verified
 
-- 180 unit tests pass; `npm run lint` and `npm run build` are clean.
+- 185 unit tests and 4 e2e tests pass; `npm run lint` and `npm run build` are clean.
 - **The full LLM → TTS → mu-law path was run against the live OpenAI API**, producing an 8 kHz WAV of
   the agent answering "May I book a table for two?" with *"Certainly. What date and time would you
   like to book for?"* — 178 frames, 3.5 s of speech, correct duration for the text.
-- The API shapes in the plan (Chat Completions delta shape, headerless streamed PCM) were confirmed
-  against the live API before the code was written, not assumed.
+- **The endpointing gate was verified against a live transcription session**, streaming synthesised
+  speech converted to 8 kHz mu-law and paced at 20 ms, i.e. exactly what a call delivers. It produced
+  one clean final: *"Hello, my name is Anna. Can I book a table for two people?"*
+- The API shapes in the plan were confirmed against the live API before the code was written.
 - Chunker guards verified on real replies: `7.30` and `Dr. Weber` do not split.
+
+## The bug this phase shipped and then fixed
+
+Worth recording, because the lesson is not about the code.
+
+The first real call transcribed the caller perfectly and the agent never answered. The cause: this
+phase was built on the belief that `input_audio_buffer.speech_started` fires. It does not — and
+neither does `speech_stopped` or `.completed`, so `onFinal` never fired and no turn ever started.
+Phase 2's plan had flagged exactly this as an open question and listed "no boundary events at all" as
+a possible outcome; it was closed on recollection instead of evidence.
+
+Every unit test passed throughout, because they drove a fake socket that emitted events the real API
+never sends. A fake built from the same wrong assumption as the code confirms the assumption rather
+than testing it. The fix was found in one live probe that printed the session's actual event
+vocabulary — the step Phase 2's plan had specified and that was skipped.
 
 ## What is not verified
 
-Stated plainly rather than folded into the section above.
-
-- **No end-to-end call.** Docker was not running, so Postgres was unavailable; `npm run test:e2e` and
-  `npm run replay` were both blocked. The state machine, barge-in, and greeting cache are covered by
-  unit tests against fakes, but have not run against a real socket.
 - **The demo criterion is not demonstrated.** A genuine back-and-forth through the dev client, and an
-  interruption on a live stream, still need doing.
-- **Latency misses the target.** Measured ~900 ms to first token and ~850 ms to first TTS audio, so
-  ~2.3 s to the first frame against a 1.5 s budget — before VAD endpointing is added on top. Almost
-  all of it is provider round-trip time. The plan records the levers; `reasoning_effort` was
-  investigated and ruled out as noise.
+  interruption on a live stream, still need doing by hand.
+- **Latency misses the target badly** — roughly 5 s from the caller stopping to the first frame,
+  against 1.5 s. The dominant term is one the budget never had: the transcriber finishes ~2.5 s after
+  the audio ends, and the endpointing window adds 1200 ms on top. The plan lists the levers; the two
+  worth trying first are the `delay` parameter and a real energy-based VAD.
+- **Barge-in cannot hit ~200 ms.** It now waits for the first decoded word rather than the first
+  energy, which is roughly 700 ms later. That half of the demo criterion is not reachable on this
+  signal.
 - **No leak test.** The 20-consecutive-interruptions check has not been run.
 - **Phase 2's change doc was deliberately skipped**, so `docs/features/` has no
   `phase-2-speech-to-text.md`. Known debt, not an oversight.

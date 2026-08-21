@@ -226,13 +226,17 @@ export class CallSession {
   /**
    * The caller has started talking. If the agent is mid-reply, stop it.
    *
-   * This is the behaviour that separates a usable phone agent from a demo, and
-   * it is why Phase 2 was built to produce this signal at all.
+   * Only while `SPEAKING`, deliberately. The signal behind this is a
+   * transcript-activity gate, not a VAD edge, so during `THINKING` it almost
+   * always means the caller's *own* sentence is continuing after a pause the
+   * endpointer called early — and there is no audio playing to interrupt
+   * anyway. Cancelling there would throw away a turn that the merge in
+   * `handleFinal` is about to complete correctly.
    */
   private handleSpeechStarted(): void {
-    if (this.state !== 'SPEAKING' && this.state !== 'THINKING') return;
+    if (this.state !== 'SPEAKING') return;
 
-    this.logger.debug(`Barge-in during ${this.state}`);
+    this.logger.debug('Barge-in while speaking');
     this.bargeIn();
   }
 

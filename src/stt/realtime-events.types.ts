@@ -258,3 +258,19 @@ export function appendAudio(base64Pcm16: string): string {
     audio: base64Pcm16,
   });
 }
+
+/**
+ * Marks the end of one utterance.
+ *
+ * With turn detection off — and `gpt-live-transcribe` rejects it outright — the
+ * *client* delimits utterances. Committing bounds the audio the session holds
+ * and closes the conversation item; the server answers with
+ * `input_audio_buffer.committed` and then a `.completed` transcript.
+ *
+ * Verified on a live session on 2026-08-21. Note that `.completed` arrived
+ * ~600 ms after the commit, which is why the endpointing gate does not wait for
+ * it before starting a turn.
+ */
+export function commitAudio(): string {
+  return JSON.stringify({ type: 'input_audio_buffer.commit' });
+}

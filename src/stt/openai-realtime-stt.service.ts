@@ -63,6 +63,35 @@ const TURN_DETECTION: TurnDetection = null;
 const TRANSCRIPTION_DELAY = 'low';
 
 /**
+ * How long the transcript must go quiet before the caller's turn is over.
+ *
+ * `gpt-live-transcribe` emits **no** boundary events at all — no
+ * `speech_started`, no `speech_stopped`, and no `.completed` unless the client
+ * commits. Verified against a live session on 2026-08-21: a full sentence plus
+ * four seconds of trailing silence produced nothing but deltas. So endpointing
+ * is ours to do, and the only signal available is the *transcript* going quiet
+ * rather than the audio.
+ *
+ * Measured mid-speech gaps between deltas, in two conditions:
+ *
+ * | Input | median | p90 | max |
+ * | --- | --- | --- | --- |
+ * | PCM16 @ 24 kHz, direct | 251 ms | 418 ms | 660 ms |
+ * | mu-law @ 8 kHz, paced 20 ms — i.e. a phone call | — | — | **~1200 ms** |
+ *
+ * The telephony figure is what matters, and it is roughly double: worse audio
+ * decodes in chunkier bursts. A value tuned on studio-quality input splits every
+ * other sentence in two on a real call.
+ *
+ * It degrades gracefully in both directions, which is what makes it safe to pick
+ * from few samples. Too low splits a sentence, and `CallSession` merges the
+ * second final into the turn already in flight. Too high adds its excess to
+ * every reply — and at this size it is now the largest single term in the
+ * latency budget, which is the strongest argument for a real VAD later.
+ */
+const ENDPOINT_SILENCE_MS = 1200;
+
+/**
  * The `ws` surface this session actually uses.
  *
  * Narrowed to nine members so the unit tests can supply a fake without
@@ -150,6 +179,26 @@ export class OpenAiSttSession implements SttSession {
   private lastSpeechStartMs?: number;
   private lastSpeechStopMs?: number;
 
+  /**
+   * The current utterance, accumulated from deltas.
+   *
+   * Concatenating them is lossless: on the verified session the joined deltas
+   * matched the committed `.completed` transcript exactly. That is what lets a
+   * turn start without waiting the ~600 ms the commit round trip costs.
+   */
+  private transcript = '';
+
+  /** Audio-clock offset of the first delta of the current utterance. */
+  private utteranceStartMs?: number;
+
+  private endpointTimer?: NodeJS.Timeout;
+
+  /** Logged once if a model ever does emit real VAD, so the gate is revisited. */
+  private sawVadEvent = false;
+
+  /** The last final emitted, to compare against the committed transcript. */
+  private lastFinal = '';
+
   private partial: Listener<[string]> = noop;
   private final: Listener<[string, { startMs: number; endMs: number }]> = noop;
   private speechStarted: Listener<[]> = noop;
@@ -222,6 +271,14 @@ export class OpenAiSttSession implements SttSession {
     this.closing = true;
 
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+
+    // The caller's last sentence is usually still inside the endpointing
+    // window when they hang up. Emitting it here is what stops the final
+    // utterance of every call being silently dropped.
+    if (this.endpointTimer) {
+      clearTimeout(this.endpointTimer);
+      this.endpoint();
+    }
 
     // Send the tail. A caller's last word can easily sit in a partial batch,
     // and dropping it loses the end of the final sentence of the call.
@@ -319,25 +376,36 @@ export class OpenAiSttSession implements SttSession {
         this.logger.debug('Session configuration accepted');
         return;
 
+      /**
+       * Not emitted by `gpt-live-transcribe`, which is why the endpointing gate
+       * below exists. Kept mapped so a model that *does* segment turns is
+       * noticed rather than silently ignored — but deliberately not wired to the
+       * callbacks, because the gate owns them and two sources would double-fire
+       * every turn.
+       */
       case 'input_audio_buffer.speech_started':
         this.lastSpeechStartMs = this.absolute(event.audio_start_ms);
-        this.speechStarted();
+        this.noteVadEvent();
         return;
 
       case 'input_audio_buffer.speech_stopped':
         this.lastSpeechStopMs = this.absolute(event.audio_end_ms);
-        this.speechStopped();
+        this.noteVadEvent();
         return;
 
       case 'conversation.item.input_audio_transcription.delta':
-        this.partial(event.delta);
+        this.onTranscriptActivity(event.delta);
         return;
 
       case 'conversation.item.input_audio_transcription.completed':
-        this.final(event.transcript, {
-          startMs: this.lastSpeechStartMs ?? this.audioMs,
-          endMs: this.lastSpeechStopMs ?? this.audioMs,
-        });
+        // The echo of our own commit, arriving well after the turn already
+        // started. Compared rather than re-emitted, so drift between the joined
+        // deltas and the server's transcript is visible if it ever appears.
+        if (event.transcript.trim() !== this.lastFinal) {
+          this.logger.debug(
+            `Committed transcript differs from the joined deltas: ${event.transcript}`,
+          );
+        }
         return;
 
       case 'error':
@@ -357,13 +425,90 @@ export class OpenAiSttSession implements SttSession {
   /**
    * A session-relative VAD timestamp to an offset into the whole call.
    *
-   * Falls back to the local audio clock when the field is absent — one of the
-   * two things this phase verifies against a live session.
+   * Falls back to the local audio clock when the field is absent — which, for
+   * `gpt-live-transcribe`, is always, since it emits no VAD events at all.
    */
   private absolute(sessionMs: number | undefined): number {
     return sessionMs === undefined
       ? this.audioMs
       : this.sessionEpochMs + sessionMs;
+  }
+
+  private noteVadEvent(): void {
+    if (this.sawVadEvent) return;
+
+    this.sawVadEvent = true;
+    this.logger.warn(
+      'This model emits VAD boundary events; the transcript-activity gate ' +
+        'could be replaced with them for faster barge-in',
+    );
+  }
+
+  // --- endpointing ------------------------------------------------------
+
+  /**
+   * The substitute for turn detection.
+   *
+   * A delta arriving after the buffer has been emptied means the caller has
+   * started talking; the transcript then going quiet for
+   * `ENDPOINT_SILENCE_MS` means they have stopped.
+   *
+   * The cost is honest and worth stating: this waits for the first *decoded
+   * word* rather than the first energy, so it is roughly 700 ms later than a
+   * true VAD edge. Barge-in inherits that delay.
+   */
+  private onTranscriptActivity(delta: string): void {
+    if (this.transcript.length === 0) {
+      this.utteranceStartMs = this.audioMs;
+      this.lastSpeechStartMs = this.utteranceStartMs;
+      this.speechStarted();
+    }
+
+    this.transcript += delta;
+
+    // Cumulative rather than the fragment: a partial is only useful as the
+    // sentence so far.
+    this.partial(this.transcript.trim());
+
+    if (this.endpointTimer) clearTimeout(this.endpointTimer);
+    this.endpointTimer = setTimeout(() => this.endpoint(), ENDPOINT_SILENCE_MS);
+  }
+
+  /** Ends the caller's turn: emit the final, then let the server release the audio. */
+  private endpoint(): void {
+    this.endpointTimer = undefined;
+
+    const text = this.transcript.trim();
+    this.transcript = '';
+    this.utteranceStartMs = undefined;
+
+    if (text.length === 0) return;
+
+    this.lastFinal = text;
+    this.lastSpeechStopMs = this.audioMs;
+
+    // `speech_stopped` before `final`, in that order: the conversation layer
+    // stamps `t0` off the first and measures the reply against it.
+    this.speechStopped();
+    this.final(text, {
+      startMs: this.lastSpeechStartMs ?? this.audioMs,
+      endMs: this.lastSpeechStopMs,
+    });
+
+    /**
+     * Deliberately **not** committing the audio buffer here.
+     *
+     * Committing does produce a clean `.completed` transcript, and with turn
+     * detection off it is the documented way to delimit an utterance — but it
+     * closes the item over whatever the transcriber has decoded *so far*, and
+     * this model routinely runs seconds behind the audio. Observed on a live
+     * session on 2026-08-21: committing at each endpoint lost the back half of
+     * a sentence outright, because the words had been received but not yet
+     * decoded when the commit landed.
+     *
+     * Since the joined deltas already give the full transcript, the commit buys
+     * a tidier item boundary at the cost of dropping words. Not worth it.
+     */
   }
 
   // --- outbound ---------------------------------------------------------

@@ -15,7 +15,7 @@
 | Greeting | Pre-synthesised and cached as mu-law bytes, keyed on a hash of the text, voice, and model. Off the critical path for first impressions, and a cached greeting still plays when OpenAI is down — which Phase 6 relies on. |
 | Outbound audio | The gateway passes an `OutboundAudioSink` down at `create()`. `CallSession` never calls back into the gateway. |
 | Multiple finals per turn | Abort the in-flight completion and restart with the merged text, rather than debouncing. Zero added latency in the common single-final case. |
-| Barge-in signal | `onSpeechStarted` confirmed firing on a live session during Phase 2. The design below stands unchanged. |
+| Barge-in signal | **Corrected mid-phase.** `onSpeechStarted` was believed to fire; it does not. See below — endpointing is now ours, and barge-in is gated on the first decoded word. |
 
 ## Confirmed API shapes
 
@@ -54,20 +54,76 @@ Measured for one sentence, *"Of course, I can take a booking request for two."*:
 Useful as a sanity check when the pipeline is wired: a frame count wildly off this ratio means the
 resampler phase or the framing is wrong, not the model.
 
+## The model emits no turn boundaries at all
+
+This phase started on the belief that `input_audio_buffer.speech_started` fires. **It does not**, and
+neither does `speech_stopped`, and neither does `.completed`. Phase 2's plan flagged this as open and
+listed it as outcome 3; it was closed on recollection rather than evidence, and the first real call
+found it — the caller was transcribed perfectly and the agent never replied, because `onFinal` never
+fired.
+
+Read off a live session on 2026-08-21 by streaming a synthesised sentence plus four seconds of
+trailing silence. The **complete** event vocabulary:
+
+```
+  1 × session.created
+  1 × session.updated
+ 16 × conversation.item.input_audio_transcription.delta
+```
+
+That is all. `gpt-live-transcribe` is a continuous transcriber with no concept of a turn, which is
+also why it rejects `turn_detection`.
+
+### The substitute: a transcript-activity gate
+
+Exactly what Phase 2 prescribed for this outcome. A delta arriving into an empty buffer means the
+caller started talking; the transcript going quiet for `ENDPOINT_SILENCE_MS` means they stopped. The
+joined deltas are the transcript — verified lossless against a committed `.completed`, character for
+character.
+
+Two things were tried and rejected, both on measurements:
+
+**`input_audio_buffer.commit` — rejected.** It is the documented way to delimit an utterance with VAD
+off, and it does return a clean `.completed`. But it closes the item over whatever has been *decoded*
+so far, and this model runs seconds behind the audio. Committing at each endpoint lost the back half
+of a sentence outright on a live run: `"Hello, my name is Anna. Can I book a table for two people?"`
+came back as `"Hello,"` and `"my name is"`, with the rest discarded. Without it, the same input
+returns as one complete final. The commit also costs ~600 ms before `.completed` arrives, so it was
+never on the critical path anyway.
+
+**A 900 ms threshold — too tight.** Mid-speech delta gaps are roughly twice as wide over 8 kHz mu-law
+as over direct 24 kHz PCM (~1200 ms against 660 ms): worse audio decodes in chunkier bursts. 900 ms
+split one sentence into three finals. Now 1200 ms.
+
+### Barge-in is narrower than planned
+
+`handleSpeechStarted` acts only while `SPEAKING`, not while `THINKING`. The signal is a
+transcript-activity gate rather than a VAD edge, so during `THINKING` it nearly always means the
+caller's own sentence continuing past a pause the endpointer called early — and no audio is playing
+to interrupt. Cancelling there would discard a turn the merge in `handleFinal` completes correctly.
+
+The honest cost: barge-in now waits for the first *decoded word* rather than the first energy, so it
+is roughly 700 ms later than a true VAD edge would be. The ~200 ms interruption target in the demo
+criterion is not achievable on this signal.
+
 ## Measured latency — the budget is not met
 
 Measured end to end against the live API on 2026-08-21, one turn, no telephony:
 
 | Stage | Budget | Measured |
 | --- | --- | --- |
+| Transcriber lag behind the audio | — | **~2500 ms** — not in the original budget at all |
+| Endpointing silence | 500 ms | **1200 ms**, and it cannot go much lower (see above) |
 | LLM first token | 400 ms | **~900 ms**, ranging 870–1500 ms with occasional 3 s outliers |
 | TTS first audio | 300 ms | **~850 ms** |
-| First frame written | 1100 ms | **~2300 ms** |
-| Plus VAD endpointing | 500 ms | not yet measured on a real line |
+| **Caller stops → first frame** | **1500 ms** | **~5000 ms** |
 
-So the 1.5 s target is missed by roughly a second, and essentially all of it is provider round-trip
-time — the chunker, resampler, and framing contribute nothing measurable. Recorded here rather than
-quietly restated, because the parent plan makes < 1.5 s a project goal.
+So the target is missed by roughly 3.5 s, and the dominant term is one the budget never accounted
+for: `gpt-live-transcribe` at `delay: "low"` finishes decoding a sentence around 2.5 s after the
+audio ends. Our own code — chunker, resampler, framing — contributes nothing measurable.
+
+Recorded plainly rather than restated softly, because the parent plan makes < 1.5 s a project goal
+and this is nowhere near it.
 
 What was ruled out: `gpt-5.6-terra` is a reasoning model, and a first sample suggested
 `reasoning_effort: "none"` cut first token threefold. **It does not.** Across three samples per
@@ -75,15 +131,25 @@ configuration, `terra` default, `terra` with `reasoning_effort: "none"`, and `gp
 indistinguishable inside the noise. The parameter is deliberately *not* set: it would be cargo cult
 based on one outlier.
 
-Levers still untried, roughly in order of expected value:
+Levers still untried, in order of expected value — the first two are worth far more than the rest,
+because they attack the 3.7 s of STT rather than the 1.75 s of LLM and TTS:
 
-1. **Shorten the system prompt.** It is re-read every turn and sits in front of first token.
-2. **`gpt-5.6-luna`.** No better here, but worth re-measuring under load — `LLM_MODEL` makes this a
-   config change.
-3. **A shorter first sentence.** Prompting for a brief opener means the chunker flushes sooner; time
+1. **The `delay` parameter.** We have only ever run `"low"`. Its whole purpose is trading word error
+   rate against latency, and a ~2.5 s decode lag suggests it is not doing what the name implies for
+   8 kHz input. Measure the other values before anything else.
+2. **A real VAD on our side.** Phase 2 argued twice against hand-rolling energy-gate endpointing, and
+   that argument was sound when the model was believed to provide boundaries. It does not. An energy
+   gate would cut both the 1200 ms endpoint window and most of the decode lag from the critical path,
+   because it detects silence in the *audio* rather than waiting for the transcript to catch up. It
+   would also restore fast barge-in. This is now the strongest option, and the reasoning against it
+   no longer applies.
+3. **A different STT model.** `gpt-realtime-whisper` and the `gpt-realtime-*` family are in the
+   account's model list and may segment turns properly. `STT_MODEL` makes this a config change.
+4. **Shorten the system prompt.** It is re-read every turn and sits in front of first token.
+5. **A shorter first sentence.** Prompting for a brief opener means the chunker flushes sooner; time
    to *first audio* matters far more than time to the whole reply.
-4. **The `gpt-realtime-2.1` speech-to-speech adapter** the parent plan holds in reserve behind the
-   provider interfaces. That is the real escalation if cascaded latency stays this high.
+6. **The `gpt-realtime-2.1` speech-to-speech adapter** the parent plan holds in reserve behind the
+   provider interfaces. The real escalation if cascaded latency stays this high.
 
 ## Objective
 

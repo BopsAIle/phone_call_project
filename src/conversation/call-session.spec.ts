@@ -71,6 +71,16 @@ class FakeStt implements SttSession {
 }
 
 /**
+ * One macrotask.
+ *
+ * The fakes below pause on this rather than on a resolved promise, so that a
+ * test advancing the clock one tick at a time sees one sentence or one frame at
+ * a time. A microtask-paced fake runs an entire turn to completion inside a
+ * single tick, leaving no mid-reply moment to interrupt.
+ */
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
  * Yields one scripted reply per call, pausing between sentences so a test can
  * interrupt mid-reply the way a real caller does.
  */
@@ -95,7 +105,7 @@ class FakeLlm implements LlmProvider {
     async function* stream(): AsyncGenerator<string> {
       try {
         for (const sentence of sentences) {
-          await Promise.resolve();
+          await tick();
           if (opts.signal.aborted) return;
 
           yield sentence;
@@ -120,7 +130,7 @@ class FakeTts implements TtsProvider {
     this.synthesised.push(opts.text);
 
     for (let i = 0; i < this.framesPerSentence; i++) {
-      await Promise.resolve();
+      await tick();
       if (opts.signal.aborted) return;
 
       yield Buffer.alloc(160, i + 1);
@@ -205,7 +215,14 @@ function rows(create: jest.Mock): Record<string, unknown>[] {
 
 /** Lets the fire-and-forget turn and persistence work settle. */
 async function settle(): Promise<void> {
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Waits until the agent has actually started writing frames. */
+async function untilSpeaking(built: ReturnType<typeof build>): Promise<void> {
+  for (let i = 0; i < 50 && built.session.turnState !== 'SPEAKING'; i++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
@@ -412,8 +429,7 @@ describe('CallSession', () => {
 
       built.llm.script.push(['A long reply.', 'Still going.']);
       built.stt.emitFinal('hello');
-      await Promise.resolve();
-      await Promise.resolve();
+      await untilSpeaking(built);
 
       built.stt.emitSpeechStarted();
       const written = built.frames.length;
@@ -429,8 +445,7 @@ describe('CallSession', () => {
 
       built.llm.script.push(['One.', 'Two.', 'Three.']);
       built.stt.emitFinal('hello');
-      await Promise.resolve();
-      await Promise.resolve();
+      await untilSpeaking(built);
 
       built.stt.emitSpeechStarted();
       await settle();
@@ -438,7 +453,14 @@ describe('CallSession', () => {
       expect(built.tts.synthesised.length).toBeLessThan(3);
     });
 
-    it('works while still THINKING, before any audio has played', async () => {
+    /**
+     * The signal behind `onSpeechStarted` is a transcript-activity gate, not a
+     * VAD edge, so during THINKING it almost always means the caller's own
+     * sentence continuing after a pause the endpointer called early. There is
+     * also no audio playing to interrupt. Cancelling would throw away a turn the
+     * merge is about to complete correctly.
+     */
+    it('is ignored while THINKING, because nothing is playing yet', async () => {
       const built = build();
       await built.session.start();
       built.session.onMarkPlayed(built.marks[0]);
@@ -448,9 +470,13 @@ describe('CallSession', () => {
       expect(built.session.turnState).toBe('THINKING');
 
       built.stt.emitSpeechStarted();
+      expect(built.state.clears).toBe(0);
+
       await settle();
 
-      expect(built.session.turnState).toBe('LISTENING');
+      // The turn survived and spoke.
+      expect(built.tts.synthesised).toEqual(['A reply.']);
+      expect(built.session.turnState).toBe('SPEAKING');
     });
 
     /** Nothing is playing, so there is nothing to interrupt. */
