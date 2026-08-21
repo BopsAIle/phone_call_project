@@ -39,7 +39,6 @@ async function bootstrap() {
   
   const port = process.env.PORT ?? 8080;
   await app.listen(port);
-  
   Logger.log(`Ứng dụng đang chạy tại: http://localhost:${port}`, 'Bootstrap');
   Logger.log(`Swagger API docs: http://localhost:${port}/api-docs`, 'Bootstrap');
 }

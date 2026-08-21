@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -9,7 +9,7 @@ import {
   TransformInterceptor,
   AllExceptionsFilter,
 } from './common';
-import { databaseConfig } from './config/database.config';
+import { DatabaseConfigService } from './config/database.config';
 import { RestaurantsModule } from './restaurants/restaurants.module';
 import { BranchesModule } from './branches/branches.module';
 import { BookingsModule } from './bookings/bookings.module';
@@ -20,7 +20,13 @@ import { BookingsModule } from './bookings/bookings.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
-    TypeOrmModule.forRoot(databaseConfig),
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => {
+        const dbConfigService = new DatabaseConfigService(configService);
+        return dbConfigService.getDatabaseConfig();
+      },
+    }),
     RestaurantsModule,
     BranchesModule,
     BookingsModule,

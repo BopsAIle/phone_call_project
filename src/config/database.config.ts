@@ -1,14 +1,26 @@
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
 
-export const databaseConfig: TypeOrmModuleOptions = {
-  type: 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  username: process.env.DB_USERNAME || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  database: process.env.DB_NAME || 'restaurant_ai',
-  entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-  synchronize: true, // Tự động tạo bảng từ entity
-  autoLoadEntities: true, // Tự load entity
-  logging: process.env.NODE_ENV === 'development',
-};
+@Injectable()
+export class DatabaseConfigService {
+  constructor(private configService: ConfigService) {}
+
+  getDatabaseConfig(): TypeOrmModuleOptions {
+    return {
+      type: 'postgres',
+      host: this.configService.get<string>('DB_HOST'),
+      port: this.configService.get<number>('DB_PORT'),
+      username: this.configService.get<string>('DB_USERNAME'),
+      password: this.configService.get<string>('DB_PASSWORD'),
+      database: this.configService.get<string>('DB_NAME'),
+      ssl: {
+        rejectUnauthorized: false,
+      },
+      entities: [__dirname + '/../**/*.entity{.ts,.js}'],
+      synchronize: true,
+      autoLoadEntities: true,
+      logging: this.configService.get<string>('NODE_ENV') === 'development',
+    };
+  }
+}
