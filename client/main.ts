@@ -404,6 +404,7 @@ const callButton = el<HTMLButtonElement>('call');
 const hangUpButton = el<HTMLButtonElement>('hangup');
 const markButton = el<HTMLButtonElement>('mark');
 const clearButton = el<HTMLButtonElement>('clear');
+const bargeInButton = el<HTMLButtonElement>('barge-in');
 const statusLine = el<HTMLParagraphElement>('status');
 const framesLine = el<HTMLParagraphElement>('frames');
 
@@ -420,6 +421,7 @@ function setLive(live: boolean): void {
   hangUpButton.disabled = !live;
   markButton.disabled = !live;
   clearButton.disabled = !live;
+  bargeInButton.disabled = !live;
 }
 
 function onClosed(): void {
@@ -456,10 +458,12 @@ hangUpButton.addEventListener('click', () => {
 });
 
 /**
- * These two ask the *server* to send a `mark` / `clear` into the live stream.
- * Phase 1's gateway only echoes media, so without a nudge those two paths stay
- * dormant — and the point of this page is that they are proven before a real
- * call, not after.
+ * Asks the *server* to act on the live stream.
+ *
+ * `mark` and `clear` push raw frames and prove the wire protocol on its own.
+ * `barge-in` drives the agent's real interruption path — abort, clear, drop the
+ * queue — from a deterministic trigger, which is the only way to test that
+ * behaviour without talking over the agent at exactly the right moment.
  */
 function trigger(path: string): void {
   if (!call) return;
@@ -469,6 +473,7 @@ function trigger(path: string): void {
 
 markButton.addEventListener('click', () => trigger('mark'));
 clearButton.addEventListener('click', () => trigger('clear'));
+bargeInButton.addEventListener('click', () => trigger('barge-in'));
 
 setLive(false);
 setStatus('Ready.', 'idle');

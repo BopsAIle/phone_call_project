@@ -141,6 +141,7 @@
           <button id="hangup" type="button">Hang up</button>
           <button id="mark" type="button">Send mark</button>
           <button id="clear" type="button">Send clear</button>
+          <button id="barge-in" type="button">Interrupt</button>
         </div>
         <p id="status" data-tone="idle">Loading…</p>
         <p id="frames"></p>
@@ -148,16 +149,22 @@
 
       <ul class="note">
         <li>
-          <strong>Use headphones.</strong> The echo feeds straight back into the
-          microphone otherwise, and it howls within a second or two.
+          <strong>Use headphones.</strong> The agent's own voice reaches the
+          microphone otherwise, and it interrupts itself mid-sentence —
+          echo cancellation reduces that but does not remove it.
         </li>
         <li>
           Reach this page over <code>localhost</code>. A LAN IP is not a secure
           context, so the microphone is unavailable there.
         </li>
         <li>
-          Send mark and Send clear ask the server to push those frames into the
-          live stream, so both protocol paths are exercised before a real call.
+          Send mark and Send clear push those frames straight into the live
+          stream, exercising the wire protocol without involving the agent.
+        </li>
+        <li>
+          Interrupt drives the real barge-in path — abort, clear, drop the
+          queue — from a deterministic trigger, so it can be tested without
+          talking over the agent at exactly the right moment.
         </li>
       </ul>
     </main>

@@ -34,6 +34,17 @@ import { readWav, writeWav } from './wav';
  * `Utterance` rows rather than from the server's log, so a WAV fixture is a
  * repeatable accuracy check. Note that `--fast` makes the transcript
  * meaningless: VAD needs real time to endpoint on.
+ *
+ * Since Phase 3 the audio coming back is the agent speaking rather than Phase
+ * 1's echo, and `--interrupt <ms>` fires a barge-in that far into the call:
+ *
+ *   npm run replay -- fixture.wav out.wav --interrupt 4000
+ *
+ * That drives the dev endpoint rather than relying on the fixture's own speech
+ * to trip VAD, because "interrupt while the agent is mid-sentence" is not
+ * something a recording can be relied on to do the same way twice. After it
+ * fires, outbound audio should stop almost immediately — which is visible both
+ * in the frame count printed at the end and in the output WAV.
  */
 
 const FRAME_INTERVAL_MS = 20;
@@ -63,6 +74,19 @@ function sid(prefix: string): string {
 function requireEnv(key: string): string {
   const value = process.env[key];
   if (!value) throw new Error(`${key} is not set; is .env present?`);
+  return value;
+}
+
+/** Reads `--flag 1234`, returning undefined when the flag is absent. */
+function numericFlag(flag: string): number | undefined {
+  const at = process.argv.indexOf(flag);
+  if (at === -1) return undefined;
+
+  const value = Number(process.argv[at + 1]);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${flag} needs a number of milliseconds`);
+  }
+
   return value;
 }
 
@@ -113,6 +137,29 @@ async function openCall(
   local.protocol = local.protocol === 'https:' ? 'wss:' : 'ws:';
 
   return { url: local.toString(), parameters };
+}
+
+/**
+ * Interrupts the agent through the dev endpoint.
+ *
+ * Deliberately not by injecting speech into the fixture: barge-in has to be
+ * asserted at a known moment, and a recording cannot be relied on to trip VAD at
+ * the same point on every run.
+ */
+async function interrupt(baseUrl: string, streamSid: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/dev/barge-in/${streamSid}`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    console.log(
+      `\n⚠ Interrupt returned ${response.status}. The dev routes are only ` +
+        'registered when the dev client is enabled.',
+    );
+    return;
+  }
+
+  console.log('\n↯ Interrupted the agent');
 }
 
 /** Sleeps until `deadline`, correcting for the drift a bare setTimeout accumulates. */
@@ -167,7 +214,15 @@ async function main(): Promise<void> {
   const inputPath = process.argv[2] ?? 'test/fixtures/tone-sweep.wav';
   const outputPath = process.argv[3] ?? 'test/fixtures/replay-output.wav';
   const realtime = !process.argv.includes('--fast');
+  const interruptAtMs = numericFlag('--interrupt');
   const baseUrl = process.env.REPLAY_BASE_URL ?? 'http://localhost:3000';
+
+  if (interruptAtMs !== undefined && !realtime) {
+    throw new Error(
+      '--interrupt needs real-time pacing; drop --fast, or there is no ' +
+        'mid-reply moment to interrupt.',
+    );
+  }
 
   const input = readWav(inputPath);
   console.log(
@@ -239,8 +294,22 @@ async function main(): Promise<void> {
   );
 
   const startedAt = Date.now();
+  let interrupted = false;
+
+  /** Frames received before the interruption, to compare against the total. */
+  let framesAtInterrupt = 0;
 
   for (let i = 0; i < frameCount; i++) {
+    if (
+      interruptAtMs !== undefined &&
+      !interrupted &&
+      Date.now() - startedAt >= interruptAtMs
+    ) {
+      interrupted = true;
+      framesAtInterrupt = received.length;
+      await interrupt(baseUrl, streamSid);
+    }
+
     socket.send(
       JSON.stringify({
         event: 'media',
@@ -291,6 +360,16 @@ async function main(): Promise<void> {
   console.log(
     `Received ${Math.round(returned.length / MULAW_FRAME_BYTES)} frames (${returned.length} bytes)`,
   );
+
+  if (interrupted) {
+    // A handful of frames may already have been in flight when `clear` was
+    // sent. Dozens means barge-in did not take, and the usual cause is a
+    // missing `clear` — the agent's own streams stopped, Twilio's buffer did not.
+    console.log(
+      `         ${received.length - framesAtInterrupt} arrived after the interrupt`,
+    );
+  }
+
   console.log(`Wrote    ${outputPath} — listen to it`);
 
   const callId = target.parameters.callId;

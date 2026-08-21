@@ -1,6 +1,7 @@
 import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import type { Server } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
+import type { OutboundAudioSink } from '../conversation/audio-sink';
 import type { CallSession } from '../conversation/call-session';
 import { ConversationService } from '../conversation/conversation.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -9,6 +10,8 @@ import { MEDIA_STREAM_PATH } from './twiml.service';
 import {
   EXPECTED_MEDIA_FORMAT,
   type StartFrame,
+  clearMessage,
+  markMessage,
   mediaMessage,
   parseInboundFrame,
 } from './twilio-frames';
@@ -45,14 +48,12 @@ interface MediaStreamSession {
  * a `{ event, data }` envelope while Twilio sends `{ event, media: {...} }` —
  * the payload is a sibling of `event`, not nested under `data`.
  *
- * Inbound `media` frames now *fork*: each one goes to the conversation layer
- * for transcription and also straight back out as the Phase 1 echo. The echo
- * stays until Phase 3 has real speech to play, because it is the only outbound
- * audio there is — removing it would leave the dev client and the replay
- * harness silent through exactly the phase that needs their feedback.
+ * Inbound `media` frames go to the conversation layer for transcription.
+ * Outbound audio is the agent's own voice, written through the
+ * `OutboundAudioSink` handed to the conversation at `start`.
  *
- * Nothing in the echo path decodes audio, so a bad echo still means a transport
- * bug and never a codec one.
+ * Phase 1's echo is gone as of Phase 3: with real speech to play, echoing the
+ * caller back would put them underneath the agent.
  */
 @Injectable()
 export class MediaStreamGateway implements BeforeApplicationShutdown {
@@ -83,7 +84,14 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
     this.logger.log(`Media stream gateway listening on ${MEDIA_STREAM_PATH}`);
   }
 
-  /** Looked up by Phase 3 to send `clear` into a call that is being interrupted. */
+  /**
+   * Used only by the dev controller, to push a `mark` or `clear` into a live
+   * stream on demand.
+   *
+   * Not the barge-in path: the conversation writes through the
+   * `OutboundAudioSink` it was given, so nothing in production looks a session
+   * up by `streamSid` to send audio.
+   */
   findByStreamSid(streamSid: string): MediaStreamSession | undefined {
     return this.byStreamSid.get(streamSid);
   }
@@ -162,23 +170,18 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
 
       case 'media':
         session.framesIn++;
-        if (session.streamSid) {
-          // The fork. Decode → upsample → STT happens inside the conversation's
-          // STT session, which takes the frame exactly as Twilio sent it.
-          session.conversation?.pushAudio(
-            Buffer.from(frame.media.payload, 'base64'),
-          );
-
-          // The Phase 1 echo, until Phase 3 has something better to say.
-          this.send(
-            session,
-            mediaMessage(session.streamSid, frame.media.payload),
-          );
-          session.framesOut++;
-        }
+        // Decode → upsample → STT happens inside the conversation's STT
+        // session, which takes the frame exactly as Twilio sent it.
+        session.conversation?.pushAudio(
+          Buffer.from(frame.media.payload, 'base64'),
+        );
         break;
 
       case 'mark':
+        // Twilio echoes a mark once the audio queued ahead of it has finished
+        // playing. That is the only reliable "the agent has stopped talking"
+        // signal, so it has to reach the conversation, not just the log.
+        session.conversation?.onMarkPlayed(frame.mark.name);
         this.logger.debug(`Mark ${frame.mark.name} played`);
         break;
 
@@ -226,18 +229,39 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
 
     session.callId = callId;
 
-    // Before the database write, deliberately. This resolves in a microtask —
-    // the STT session buffers while its socket connects — whereas the `update`
-    // below is a round trip. Opening the conversation second would drop the
-    // frames that arrive during it, and those are the first frames of the call.
+    // The store comes back with the call because the greeting lives on it, and
+    // the greeting is needed before the caller has said anything at all.
+    let call: Awaited<ReturnType<typeof this.loadCall>>;
+
+    try {
+      call = await this.loadCall(callId, streamSid);
+      session.startedAt = call.startedAt;
+    } catch (error: unknown) {
+      // Audio beats bookkeeping, but without the store there is no greeting and
+      // no store name for the prompt, so this call cannot hold a conversation.
+      this.logger.error(
+        `Could not attach stream ${streamSid} to call ${callId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
+    }
+
+    const { store } = call;
+
     try {
       session.conversation = await this.conversations.create({
         callId,
         streamSid,
+        greeting:
+          store.defaultLocale === 'de' ? store.greetingDe : store.greetingEn,
+        storeName: store.name,
+        timezone: store.timezone,
+        sink: this.sinkFor(session, streamSid),
       });
     } catch (error: unknown) {
-      // Audio beats transcription: a call that cannot be transcribed is worth
-      // far more than a call that does not connect.
+      // Audio beats conversation: a call that cannot reach OpenAI is still
+      // worth connecting, and Phase 6 turns this into a spoken apology.
       this.logger.error(
         `Could not open a conversation for call ${callId}: ${
           error instanceof Error ? error.message : String(error)
@@ -245,21 +269,44 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
       );
     }
 
-    try {
-      const call = await this.prisma.call.update({
-        where: { id: callId },
-        data: { streamSid },
-      });
-      session.startedAt = call.startedAt;
-    } catch (error: unknown) {
-      this.logger.error(
-        `Could not attach stream ${streamSid} to call ${callId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-
     this.logger.log(`Stream ${streamSid} started for call ${callId}`);
+
+    // After the session is registered, so a mark echoing back off the greeting
+    // has somewhere to land.
+    await session.conversation?.start();
+  }
+
+  private loadCall(callId: string, streamSid: string) {
+    return this.prisma.call.update({
+      where: { id: callId },
+      data: { streamSid },
+      include: { store: true },
+    });
+  }
+
+  /**
+   * The agent's voice, as the conversation layer sees it.
+   *
+   * Built here and passed down rather than looked up from the conversation,
+   * which would make a cycle (gateway → ConversationService → CallSession →
+   * gateway) and leak `MediaStreamSession` across the seam.
+   */
+  private sinkFor(
+    session: MediaStreamSession,
+    streamSid: string,
+  ): OutboundAudioSink {
+    return {
+      playFrame: (frame: Buffer) => {
+        this.send(session, mediaMessage(streamSid, frame.toString('base64')));
+        session.framesOut++;
+      },
+      mark: (name: string) => {
+        this.send(session, markMessage(streamSid, name));
+      },
+      clear: () => {
+        this.send(session, clearMessage(streamSid));
+      },
+    };
   }
 
   /**
