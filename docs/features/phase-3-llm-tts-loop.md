@@ -117,12 +117,13 @@ state. That is what prevents the classic overlapping-replies failure.
 window would add its full duration to *every* turn against an already-missed budget, to fix a case
 that is the exception. Restarting costs one wasted partial completion, and only when it happens.
 
-**Turn boundaries are ours, because the model has none.** `gpt-live-transcribe` emits only deltas —
-no `speech_started`, no `speech_stopped`, no `.completed`. `OpenAiSttSession` therefore endpoints on
-the transcript going quiet for 1200 ms, and the joined deltas are the transcript. The audio buffer is
-deliberately **not** committed: committing closes the item over whatever has been decoded so far, and
-this model runs seconds behind the audio, so it discards words. Details and measurements are in the
-plan.
+**Endpointing is adaptive, because turn detection depends on the model.** `STT_MODEL` defaults to
+`gpt-4o-transcribe`, which reports `speech_started` / `speech_stopped` / `.completed` and endpoints
+turns for us. `gpt-live-transcribe` reports none of those, so the session falls back to ending a turn
+when the transcript goes quiet, joining the deltas itself. It adopts whichever the model actually
+sends rather than trusting its config, and the two paths can never both fire — that would be two
+replies per turn. VAD boundaries are tracked per `item_id`, because `.completed` for one utterance
+routinely arrives after `speech_started` for the next.
 
 **Barge-in only fires while `SPEAKING`.** Because the signal is transcript activity rather than a VAD
 edge, "speech started" during `THINKING` nearly always means the caller's own sentence continuing
@@ -160,28 +161,38 @@ so iteration does not go through real calls.
 
 Worth recording, because the lesson is not about the code.
 
-The first real call transcribed the caller perfectly and the agent never answered. The cause: this
-phase was built on the belief that `input_audio_buffer.speech_started` fires. It does not — and
-neither does `speech_stopped` or `.completed`, so `onFinal` never fired and no turn ever started.
-Phase 2's plan had flagged exactly this as an open question and listed "no boundary events at all" as
-a possible outcome; it was closed on recollection instead of evidence.
+The first real call transcribed the caller perfectly and the agent never answered. This phase was
+built on the belief that `input_audio_buffer.speech_started` fires. It does not for
+`gpt-live-transcribe` — and neither does `speech_stopped` or `.completed`, so `onFinal` never fired
+and no turn ever started. Phase 2's plan had flagged exactly this as an open question and listed "no
+boundary events at all" as a possible outcome; it was closed on recollection instead of evidence.
 
 Every unit test passed throughout, because they drove a fake socket that emitted events the real API
 never sends. A fake built from the same wrong assumption as the code confirms the assumption rather
 than testing it. The fix was found in one live probe that printed the session's actual event
 vocabulary — the step Phase 2's plan had specified and that was skipped.
 
+**The root cause was one step further back.** Phase 2 read `Turn detection is not supported for this
+transcription model` and concluded turn detection was unavailable. The message says *this model*.
+Four other transcription models in the same account accept `server_vad`; only `gpt-live-transcribe`
+and `gpt-realtime-whisper` reject it. Switching `STT_MODEL` to `gpt-4o-transcribe` restored the
+original design and removed ~1.9 s from every reply. A vendor error naming *this model* is a prompt
+to try another one.
+
 ## What is not verified
 
 - **The demo criterion is not demonstrated.** A genuine back-and-forth through the dev client, and an
   interruption on a live stream, still need doing by hand.
-- **Latency misses the target badly** — roughly 5 s from the caller stopping to the first frame,
-  against 1.5 s. The dominant term is one the budget never had: the transcriber finishes ~2.5 s after
-  the audio ends, and the endpointing window adds 1200 ms on top. The plan lists the levers; the two
-  worth trying first are the `delay` parameter and a real energy-based VAD.
-- **Barge-in cannot hit ~200 ms.** It now waits for the first decoded word rather than the first
-  energy, which is roughly 700 ms later. That half of the demo criterion is not reachable on this
-  signal.
+- **Latency still misses the target** — roughly 3.6 s from the caller stopping to the first frame,
+  against 1.5 s. The model switch removed ~1.9 s of the original ~5.5 s. STT remains the largest term
+  at ~1850 ms, of which 800 ms is the deliberate `silenceDurationMs` choice. The plan ranks the
+  remaining levers.
+- **`silenceDurationMs` is tuned on synthesised speech.** 500 ms split a sentence at its commas;
+  800 ms did not. Real callers pause less evenly, so this is the first constant to revisit on real
+  calls — in either direction.
+- **Barge-in timing has not been re-measured** since server VAD replaced the transcript gate. It
+  should now be far closer to the ~200 ms target, because `speech_started` fires on audio energy
+  rather than on the first decoded word, but that is inference rather than measurement.
 - **No leak test.** The 20-consecutive-interruptions check has not been run.
 - **Phase 2's change doc was deliberately skipped**, so `docs/features/` has no
   `phase-2-speech-to-text.md`. Known debt, not an oversight.

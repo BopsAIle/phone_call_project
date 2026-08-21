@@ -54,13 +54,24 @@ Measured for one sentence, *"Of course, I can take a booking request for two."*:
 Useful as a sanity check when the pipeline is wired: a frame count wildly off this ratio means the
 resampler phase or the framing is wrong, not the model.
 
-## The model emits no turn boundaries at all
+## The wrong STT model was chosen
 
-This phase started on the belief that `input_audio_buffer.speech_started` fires. **It does not**, and
-neither does `speech_stopped`, and neither does `.completed`. Phase 2's plan flagged this as open and
-listed it as outcome 3; it was closed on recollection rather than evidence, and the first real call
-found it — the caller was transcribed perfectly and the agent never replied, because `onFinal` never
-fired.
+This phase started on the belief that `input_audio_buffer.speech_started` fires. It does not for
+`gpt-live-transcribe`, and neither does `speech_stopped` or `.completed`. Phase 2's plan flagged this
+as open and listed it as outcome 3; it was closed on recollection rather than evidence, and the first
+real call found it — the caller was transcribed perfectly and the agent never replied, because
+`onFinal` never fired.
+
+**The deeper mistake was narrower than it looked.** Phase 2 read
+`Turn detection is not supported for this transcription model` and concluded turn detection was
+unavailable. The message says *this model*. Probed on 2026-08-21, `gpt-4o-transcribe`,
+`gpt-4o-mini-transcribe`, `gpt-transcribe`, and `whisper-1` all accept `server_vad`; only
+`gpt-live-transcribe` and `gpt-realtime-whisper` reject it. `STT_MODEL` now defaults to
+`gpt-4o-transcribe` and the original design works as written.
+
+The transcript-activity gate below is kept as the fallback for a model without VAD, since `STT_MODEL`
+is configuration. The session adopts whichever the model actually provides — see "Adaptive
+endpointing".
 
 Read off a live session on 2026-08-21 by streaming a synthesised sentence plus four seconds of
 trailing silence. The **complete** event vocabulary:
@@ -74,7 +85,36 @@ trailing silence. The **complete** event vocabulary:
 That is all. `gpt-live-transcribe` is a continuous transcriber with no concept of a turn, which is
 also why it rejects `turn_detection`.
 
-### The substitute: a transcript-activity gate
+### Adaptive endpointing
+
+The session does not trust its configuration about which signals it will get — it adopts whichever
+arrives. The first `speech_started` or `speech_stopped` sets `vadDriven`, permanently disarms the
+transcript gate (cancelling any timer it had already armed), and hands turns to the model. Without a
+boundary event the gate runs exactly as before.
+
+The two must never both fire: each would emit its own final for one utterance, and the conversation
+layer would answer twice.
+
+**Boundaries are tracked per `item_id`, not "most recent".** `.completed` for one utterance routinely
+arrives *after* `speech_started` for the next, so reading the latest boundary at completion time
+attributes one turn's timestamps to another — observed live, with two consecutive utterances both
+reporting `startMs: 2476`.
+
+**`silenceDurationMs` is the tuning knob, and 500 ms was too low.** It cut *"Hello, my name is Anna.
+Can I book a table for two people?"* into three separate turns, because the pauses at the commas
+cleared it — a caller gathering their thoughts mid-sentence would be cut off the same way. At 800 ms
+the same input returns as one clean utterance. The cost is explicit:
+
+| `silenceDurationMs` | Result | Caller falls silent → transcript |
+| --- | --- | --- |
+| 500 ms | split into three turns | +1360 ms |
+| **800 ms** | one clean turn | **+1849 ms** |
+| the gate, for comparison | one turn | +3700 ms |
+
+Both figures come from synthesised speech, which pauses more evenly than a person. This is the first
+thing to adjust on real calls: raise it if the agent talks over people, lower it if replies drag.
+
+### The fallback: a transcript-activity gate
 
 Exactly what Phase 2 prescribed for this outcome. A delta arriving into an empty buffer means the
 caller started talking; the transcript going quiet for `ENDPOINT_SILENCE_MS` means they stopped. The
@@ -110,20 +150,21 @@ criterion is not achievable on this signal.
 
 Measured end to end against the live API on 2026-08-21, one turn, no telephony:
 
-| Stage | Budget | Measured |
-| --- | --- | --- |
-| Transcriber lag behind the audio | — | **~2500 ms** — not in the original budget at all |
-| Endpointing silence | 500 ms | **1200 ms**, and it cannot go much lower (see above) |
-| LLM first token | 400 ms | **~900 ms**, ranging 870–1500 ms with occasional 3 s outliers |
-| TTS first audio | 300 ms | **~850 ms** |
-| **Caller stops → first frame** | **1500 ms** | **~5000 ms** |
+| Stage | Budget | Before the model switch | After |
+| --- | --- | --- | --- |
+| Caller stops → transcript | 500 ms | ~3700 ms | **~1850 ms** |
+| LLM first token | 400 ms | ~900 ms | ~900 ms |
+| TTS first audio | 300 ms | ~850 ms | ~850 ms |
+| **Caller stops → first frame** | **1500 ms** | ~5500 ms | **~3600 ms** |
 
-So the target is missed by roughly 3.5 s, and the dominant term is one the budget never accounted
-for: `gpt-live-transcribe` at `delay: "low"` finishes decoding a sentence around 2.5 s after the
-audio ends. Our own code — chunker, resampler, framing — contributes nothing measurable.
+The model switch removed roughly 1.9 s. The target is still missed by about 2 s, and STT remains the
+largest single term at ~1850 ms even with server VAD — of which 800 ms is the deliberate
+`silenceDurationMs` choice above and the rest is decode time.
+
+Our own code — chunker, resampler, framing — contributes nothing measurable in either column.
 
 Recorded plainly rather than restated softly, because the parent plan makes < 1.5 s a project goal
-and this is nowhere near it.
+and this is not yet there.
 
 What was ruled out: `gpt-5.6-terra` is a reasoning model, and a first sample suggested
 `reasoning_effort: "none"` cut first token threefold. **It does not.** Across three samples per
@@ -131,25 +172,25 @@ configuration, `terra` default, `terra` with `reasoning_effort: "none"`, and `gp
 indistinguishable inside the noise. The parameter is deliberately *not* set: it would be cargo cult
 based on one outlier.
 
-Levers still untried, in order of expected value — the first two are worth far more than the rest,
-because they attack the 3.7 s of STT rather than the 1.75 s of LLM and TTS:
+Levers still untried, in order of expected value:
 
-1. **The `delay` parameter.** We have only ever run `"low"`. Its whole purpose is trading word error
-   rate against latency, and a ~2.5 s decode lag suggests it is not doing what the name implies for
-   8 kHz input. Measure the other values before anything else.
-2. **A real VAD on our side.** Phase 2 argued twice against hand-rolling energy-gate endpointing, and
-   that argument was sound when the model was believed to provide boundaries. It does not. An energy
-   gate would cut both the 1200 ms endpoint window and most of the decode lag from the critical path,
-   because it detects silence in the *audio* rather than waiting for the transcript to catch up. It
-   would also restore fast barge-in. This is now the strongest option, and the reasoning against it
-   no longer applies.
-3. **A different STT model.** `gpt-realtime-whisper` and the `gpt-realtime-*` family are in the
-   account's model list and may segment turns properly. `STT_MODEL` makes this a config change.
-4. **Shorten the system prompt.** It is re-read every turn and sits in front of first token.
-5. **A shorter first sentence.** Prompting for a brief opener means the chunker flushes sooner; time
+1. **Tune `silenceDurationMs` against real calls.** 800 ms of the ~1850 ms is this constant, chosen
+   on synthesised speech that pauses more evenly than a person. Real callers may tolerate 600 ms,
+   which would be an immediate 200 ms with no other change.
+2. **Shorten the system prompt.** It is re-read every turn and sits in front of first token.
+3. **A shorter first sentence.** Prompting for a brief opener means the chunker flushes sooner; time
    to *first audio* matters far more than time to the whole reply.
-6. **The `gpt-realtime-2.1` speech-to-speech adapter** the parent plan holds in reserve behind the
-   provider interfaces. The real escalation if cascaded latency stays this high.
+4. **`gpt-5.6-luna`.** Indistinguishable from `terra` in testing, but worth re-measuring under load —
+   `LLM_MODEL` makes it a config change.
+5. **The `gpt-realtime-2.1` speech-to-speech adapter** the parent plan holds in reserve behind the
+   provider interfaces. Evaluated and deferred on 2026-08-21: it would remove the cascade entirely
+   and get closest to the target, but Phase 4 requires the readback to be *generated from stored
+   values rather than paraphrased by the model*, which an S2S model cannot guarantee. That is a
+   safety property for a booking system, not a preference. Revisit if the levers above stall.
+
+**A hand-rolled energy VAD is no longer on this list.** It was the leading candidate while the model
+was believed to report no boundaries; with `server_vad` doing the job properly, writing our own would
+be re-solving a solved problem — exactly what Phase 2 argued against twice.
 
 ## Objective
 

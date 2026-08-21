@@ -49,28 +49,61 @@ const SOCKET_BUFFER_CAP_BYTES = 256 * 1024;
 const RECONNECT_BACKOFF_MS = [200, 500, 1000];
 
 /**
- * `gpt-live-transcribe` chunks audio itself and rejects an explicit
- * `turn_detection` block outright — see the `TurnDetection` type. Sending one
- * fails the whole `session.update`, so the session opens and then transcribes
- * nothing.
+ * Cap on VAD boundaries held while waiting for their transcript.
  *
- * Kept as a named constant rather than inlined so that the day a model does
- * accept VAD, this is the single line to change.
+ * Entries are removed when the matching `.completed` lands, so this only bites
+ * if one never does — over a call that can run for many minutes, an unbounded
+ * map would be a slow leak per concurrent call.
  */
-const TURN_DETECTION: TurnDetection = null;
+const MAX_TRACKED_ITEMS = 16;
 
-/** Latency against word error rate. See the phase plan; may want raising on real phone audio. */
+/**
+ * Server-side voice activity detection, for models that support it.
+ *
+ * Measured against a live `gpt-4o-transcribe` session on 2026-08-21:
+ * `speech_stopped` lands ~550–800 ms after the caller falls silent and the full
+ * `.completed` transcript ~1.1–1.4 s after — against the 3700 ms the
+ * transcript-activity fallback costs. That difference is most of this project's
+ * latency problem.
+ *
+ * `silenceDurationMs` is the important knob and 500 ms is **too low**: it cut
+ * *"Hello, my name is Anna. Can I book a table for two people?"* into three
+ * separate turns, because the pauses at the commas cleared it. A caller
+ * gathering their thoughts mid-sentence would be interrupted the same way.
+ * 800 ms clears an ordinary comma pause while still ending a turn promptly; it
+ * is the first thing to raise if the agent talks over people, and to lower if
+ * replies feel sluggish.
+ *
+ * `sessionUpdate` drops this automatically for a model whose profile does not
+ * accept it, so it is safe to leave set.
+ */
+const TURN_DETECTION: TurnDetection = {
+  threshold: 0.5,
+  prefixPaddingMs: 300,
+  silenceDurationMs: 800,
+};
+
+/**
+ * Latency against word error rate, for `gpt-live-transcribe` only — every other
+ * model rejects the key, and `sessionUpdate` omits it for them.
+ */
 const TRANSCRIPTION_DELAY = 'low';
 
 /**
- * How long the transcript must go quiet before the caller's turn is over.
+ * How long the transcript must go quiet before the caller's turn is over —
+ * **the fallback**, used only when the model reports no turn boundaries.
  *
- * `gpt-live-transcribe` emits **no** boundary events at all — no
- * `speech_started`, no `speech_stopped`, and no `.completed` unless the client
- * commits. Verified against a live session on 2026-08-21: a full sentence plus
- * four seconds of trailing silence produced nothing but deltas. So endpointing
- * is ours to do, and the only signal available is the *transcript* going quiet
+ * `gpt-live-transcribe` emits none at all: no `speech_started`, no
+ * `speech_stopped`, and no `.completed` unless the client commits. Verified
+ * against a live session on 2026-08-21, where a full sentence plus four seconds
+ * of trailing silence produced nothing but deltas. For that model endpointing is
+ * ours to do, and the only signal available is the *transcript* going quiet
  * rather than the audio.
+ *
+ * A model with server VAD — the default since the model switch — disarms this
+ * gate on its first boundary event. Both paths are kept because `STT_MODEL` is
+ * configuration, so the code has to be correct either way; what it must never
+ * do is run both at once, which would be two replies per turn.
  *
  * Measured mid-speech gaps between deltas, in two conditions:
  *
@@ -193,11 +226,28 @@ export class OpenAiSttSession implements SttSession {
 
   private endpointTimer?: NodeJS.Timeout;
 
-  /** Logged once if a model ever does emit real VAD, so the gate is revisited. */
-  private sawVadEvent = false;
+  /**
+   * Set by the first boundary event the model sends.
+   *
+   * Once true the transcript-activity gate is disarmed for good and turns come
+   * from VAD. The two must never run together: each would emit its own final
+   * for the same utterance, and the conversation layer would answer twice.
+   */
+  private vadDriven = false;
 
-  /** The last final emitted, to compare against the committed transcript. */
+  /** The last final emitted by the gate, to compare against the server's. */
   private lastFinal = '';
+
+  /**
+   * VAD boundaries awaiting their transcript, keyed by the item they describe.
+   *
+   * Not a single "most recent" pair, because `.completed` for one utterance
+   * routinely arrives after `speech_started` for the next.
+   */
+  private readonly boundaries = new Map<
+    string,
+    { startMs?: number; endMs?: number }
+  >();
 
   private partial: Listener<[string]> = noop;
   private final: Listener<[string, { startMs: number; endMs: number }]> = noop;
@@ -256,11 +306,12 @@ export class OpenAiSttSession implements SttSession {
   }
 
   setLocale(locale: 'en' | 'de'): void {
-    if (this.config.languages[0] === locale) return;
+    if (this.config.locale === locale) return;
 
-    // `languages` is an array for gpt-live-transcribe; the singular `language`
-    // of older models is rejected at connect time, on a live call.
-    this.config = { ...this.config, languages: [locale] };
+    // `sessionUpdate` shapes this into `language` or `languages` per the
+    // model's dialect — sending the wrong one is rejected at connect time, on a
+    // live call rather than in a test.
+    this.config = { ...this.config, locale };
 
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(sessionUpdate(this.config));
@@ -377,33 +428,52 @@ export class OpenAiSttSession implements SttSession {
         return;
 
       /**
-       * Not emitted by `gpt-live-transcribe`, which is why the endpointing gate
-       * below exists. Kept mapped so a model that *does* segment turns is
-       * noticed rather than silently ignored — but deliberately not wired to the
-       * callbacks, because the gate owns them and two sources would double-fire
-       * every turn.
+       * The preferred path. A boundary event means the model endpoints for us,
+       * which is both faster and more accurate than watching the transcript go
+       * quiet — VAD hears the audio stop, the gate waits for the decoder to
+       * catch up first.
        */
       case 'input_audio_buffer.speech_started':
+        this.adoptVad();
         this.lastSpeechStartMs = this.absolute(event.audio_start_ms);
-        this.noteVadEvent();
+        this.rememberBoundary(event.item_id, {
+          startMs: this.lastSpeechStartMs,
+        });
+        this.speechStarted();
         return;
 
       case 'input_audio_buffer.speech_stopped':
+        this.adoptVad();
         this.lastSpeechStopMs = this.absolute(event.audio_end_ms);
-        this.noteVadEvent();
+        this.rememberBoundary(event.item_id, { endMs: this.lastSpeechStopMs });
+        this.speechStopped();
         return;
 
       case 'conversation.item.input_audio_transcription.delta':
+        if (this.vadDriven) {
+          // Accumulated only to show a cumulative partial; the authoritative
+          // transcript comes from `.completed`.
+          this.transcript += event.delta;
+          this.partial(this.transcript.trim());
+          return;
+        }
+
         this.onTranscriptActivity(event.delta);
         return;
 
       case 'conversation.item.input_audio_transcription.completed':
-        // The echo of our own commit, arriving well after the turn already
-        // started. Compared rather than re-emitted, so drift between the joined
-        // deltas and the server's transcript is visible if it ever appears.
+        if (this.vadDriven) {
+          this.transcript = '';
+          this.final(event.transcript.trim(), this.boundaryFor(event.item_id));
+          return;
+        }
+
+        // Without VAD this is only ever the echo of a commit, arriving long
+        // after the gate already ended the turn. Compared rather than
+        // re-emitted, so drift from the joined deltas would be visible.
         if (event.transcript.trim() !== this.lastFinal) {
           this.logger.debug(
-            `Committed transcript differs from the joined deltas: ${event.transcript}`,
+            `Server transcript differs from the joined deltas: ${event.transcript}`,
           );
         }
         return;
@@ -434,14 +504,65 @@ export class OpenAiSttSession implements SttSession {
       : this.sessionEpochMs + sessionMs;
   }
 
-  private noteVadEvent(): void {
-    if (this.sawVadEvent) return;
+  /**
+   * Files a VAD boundary against the item it belongs to.
+   *
+   * `.completed` for one utterance routinely arrives *after* `speech_started`
+   * for the next, so reading the most recent boundary at completion time
+   * attributes one turn's timestamps to another. Observed live on 2026-08-21:
+   * two consecutive utterances both reported `startMs: 2476`.
+   */
+  private rememberBoundary(
+    itemId: string | undefined,
+    boundary: { startMs?: number; endMs?: number },
+  ): void {
+    if (itemId === undefined) return;
 
-    this.sawVadEvent = true;
-    this.logger.warn(
-      'This model emits VAD boundary events; the transcript-activity gate ' +
-        'could be replaced with them for faster barge-in',
-    );
+    const existing = this.boundaries.get(itemId);
+    this.boundaries.set(itemId, { ...existing, ...boundary });
+
+    // Entries are normally removed when their transcript lands. This caps the
+    // damage if one never does, over a call that can run for many minutes.
+    if (this.boundaries.size > MAX_TRACKED_ITEMS) {
+      const oldest = this.boundaries.keys().next();
+      if (!oldest.done) this.boundaries.delete(oldest.value);
+    }
+  }
+
+  /** The boundaries for one item, falling back to the local audio clock. */
+  private boundaryFor(itemId: string | undefined): {
+    startMs: number;
+    endMs: number;
+  } {
+    const tracked =
+      itemId === undefined ? undefined : this.boundaries.get(itemId);
+    if (itemId !== undefined) this.boundaries.delete(itemId);
+
+    return {
+      startMs: tracked?.startMs ?? this.lastSpeechStartMs ?? this.audioMs,
+      endMs: tracked?.endMs ?? this.lastSpeechStopMs ?? this.audioMs,
+    };
+  }
+
+  /**
+   * Hands endpointing to the model on its first boundary event.
+   *
+   * Cancelling the pending timer here is the important part: a gate armed by
+   * deltas that arrived before the first `speech_started` would otherwise fire
+   * partway through the VAD-driven turn and emit a duplicate final.
+   */
+  private adoptVad(): void {
+    if (this.vadDriven) return;
+
+    this.vadDriven = true;
+
+    if (this.endpointTimer) {
+      clearTimeout(this.endpointTimer);
+      this.endpointTimer = undefined;
+    }
+
+    this.transcript = '';
+    this.logger.log('Server VAD active; using model turn detection');
   }
 
   // --- endpointing ------------------------------------------------------
@@ -599,7 +720,7 @@ export class OpenAiRealtimeSttService implements SttProvider {
 
     const sessionConfig: SessionConfig = {
       model: this.config.get('STT_MODEL', { infer: true }),
-      languages: [locale],
+      locale,
       delay: TRANSCRIPTION_DELAY,
       turnDetection: TURN_DETECTION,
     };

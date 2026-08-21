@@ -184,34 +184,81 @@ export interface TurnDetectionConfig {
   silenceDurationMs: number;
 }
 
-/**
- * `null` means "let the model chunk the audio itself".
- *
- * Turn-detection support depends on the transcription model, and
- * `gpt-live-transcribe` does **not** accept it — a `server_vad` block comes
- * back as `Turn detection is not supported for this transcription model.
- * (invalid_value)`, verified against a live session on 2026-08-21. The
- * documented example for this model sends `null` explicitly, so we do too
- * rather than omitting the key.
- *
- * The shape is kept because other transcription models do support it, and
- * because this is the knob Phase 6 would reach for if endpointing ever needs
- * tuning against real phone noise.
- */
+/** `null` means the model does its own chunking and accepts no VAD block. */
 export type TurnDetection = TurnDetectionConfig | null;
+
+/**
+ * Which dialect of the transcription config a model speaks.
+ *
+ * Three fields vary between models, and **every unsupported key is rejected
+ * outright** — the whole `session.update` fails, the socket stays open, and the
+ * session then transcribes nothing. That looks like silence rather than a
+ * configuration error, which is how it went unnoticed through Phase 2 and most
+ * of Phase 3.
+ *
+ * Probed directly against the live API on 2026-08-21:
+ *
+ * | Field | `gpt-live-transcribe` | `gpt-4o-transcribe` and friends |
+ * | --- | --- | --- |
+ * | locale | `languages: ["en"]` | `language: "en"` — the array is rejected |
+ * | `delay` | required, `"low"` | rejected |
+ * | `turn_detection` | must be `null` | `server_vad` object |
+ *
+ * `server_vad` is accepted by `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`,
+ * `gpt-transcribe`, and `whisper-1`; rejected by `gpt-live-transcribe` and
+ * `gpt-realtime-whisper` with `Turn detection is not supported for this
+ * transcription model.`
+ */
+export interface SttModelProfile {
+  /** Newer models take one code; `gpt-live-transcribe` takes an array. */
+  localeKey: 'language' | 'languages';
+  /** Trades latency against word error rate. Only `gpt-live-transcribe`. */
+  supportsDelay: boolean;
+  /** Whether the model will endpoint turns for us. */
+  supportsTurnDetection: boolean;
+}
+
+/**
+ * The `gpt-live-transcribe` dialect — the outlier, kept because it is the model
+ * Phase 2 was built against and remains a valid `STT_MODEL`.
+ */
+const LIVE_TRANSCRIBE: SttModelProfile = {
+  localeKey: 'languages',
+  supportsDelay: true,
+  supportsTurnDetection: false,
+};
+
+/** Everything else, and the default for an unrecognised model. */
+const STANDARD: SttModelProfile = {
+  localeKey: 'language',
+  supportsDelay: false,
+  supportsTurnDetection: true,
+};
+
+const PROFILES: Record<string, SttModelProfile> = {
+  'gpt-live-transcribe': LIVE_TRANSCRIBE,
+  'gpt-realtime-whisper': { ...STANDARD, supportsTurnDetection: false },
+};
+
+/**
+ * Unknown models get the common dialect rather than throwing.
+ *
+ * `STT_MODEL` is configuration, so an unlisted value has to boot. Guessing the
+ * majority shape is strictly better than refusing to start, and a wrong guess
+ * surfaces immediately as a rejected `session.update` in the log.
+ */
+export function profileFor(model: string): SttModelProfile {
+  return PROFILES[model] ?? STANDARD;
+}
 
 export interface SessionConfig {
   model: string;
+  /** One ISO 639-1 code. The builder shapes it per the model's dialect. */
+  locale: string;
   /**
-   * ISO 639-1 codes. `gpt-live-transcribe` takes an **array**; the singular
-   * `language` belongs to older models and is rejected at connect time — on a
-   * live call, not in a test.
-   */
-  languages: string[];
-  /**
-   * Latency against word error rate. Typed as a string rather than a union
-   * because the full set of accepted values is not enumerated in the reference;
-   * `"low"` is the documented example and our default.
+   * Latency against word error rate, for models that accept it. Typed as a
+   * string rather than a union because the accepted values are not enumerated
+   * in the reference; `"low"` is the documented example.
    */
   delay: string;
   turnDetection: TurnDetection;
@@ -227,6 +274,27 @@ export interface SessionConfig {
  * chunked, it does not trigger a reply.
  */
 export function sessionUpdate(config: SessionConfig): string {
+  const profile = profileFor(config.model);
+
+  const transcription: Record<string, unknown> = { model: config.model };
+
+  transcription[profile.localeKey] =
+    profile.localeKey === 'languages' ? [config.locale] : config.locale;
+
+  if (profile.supportsDelay) transcription.delay = config.delay;
+
+  // Sent explicitly as `null` rather than omitted when unsupported: that is
+  // what the documented example for gpt-live-transcribe does.
+  const turnDetection =
+    profile.supportsTurnDetection && config.turnDetection
+      ? {
+          type: 'server_vad',
+          threshold: config.turnDetection.threshold,
+          prefix_padding_ms: config.turnDetection.prefixPaddingMs,
+          silence_duration_ms: config.turnDetection.silenceDurationMs,
+        }
+      : null;
+
   return JSON.stringify({
     type: 'session.update',
     session: {
@@ -234,17 +302,8 @@ export function sessionUpdate(config: SessionConfig): string {
       audio: {
         input: {
           format: { type: 'audio/pcm', rate: 24000 },
-          transcription: {
-            model: config.model,
-            languages: config.languages,
-            delay: config.delay,
-          },
-          turn_detection: config.turnDetection && {
-            type: 'server_vad',
-            threshold: config.turnDetection.threshold,
-            prefix_padding_ms: config.turnDetection.prefixPaddingMs,
-            silence_duration_ms: config.turnDetection.silenceDurationMs,
-          },
+          transcription,
+          turn_detection: turnDetection,
         },
       },
     },
