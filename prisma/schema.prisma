@@ -61,6 +61,10 @@ model Utterance {
   role      Role // CALLER | AGENT
   text      String
   startMs   Int
+  // Offsets into the call's audio, from the VAD boundaries. Nullable because an
+  // AGENT utterance has no measured end — Phase 3 knows when it started speaking,
+  // not when the caller finished hearing it.
+  endMs     Int?
   latencyMs Int? // per-stage timing, for tuning
   createdAt DateTime @default(now())
 
