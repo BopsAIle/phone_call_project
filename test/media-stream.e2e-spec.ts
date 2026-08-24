@@ -44,6 +44,9 @@ describe('MediaStreamGateway (e2e)', () => {
 
   let sockets: WebSocket[];
 
+  /** Long enough for a frame to be handled and anything outbound to arrive. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+
   async function connect(): Promise<WebSocket> {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/media-stream`);
     sockets.push(socket);
@@ -93,39 +96,55 @@ describe('MediaStreamGateway (e2e)', () => {
     await app.close();
   });
 
-  it('echoes a media frame back on the same streamSid', async () => {
+  /**
+   * Everything outbound is now the agent's voice, and this start frame has no
+   * `callId`, so no conversation opens and nothing should be written back.
+   *
+   * Until Phase 3 the assertion here was that the frame came straight back as
+   * Phase 1's echo. That echo is gone — with real speech to play, echoing the
+   * caller would put them underneath the agent.
+   */
+  it('accepts a media frame without writing anything back', async () => {
     const socket = await connect();
-    const echoed = new Promise<string>((resolve) => {
-      socket.on('message', (raw: Buffer) => {
-        const frame = parseInboundFrame(raw);
-        if (frame?.event === 'media') resolve(frame.media.payload);
-      });
+    const outbound: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const frame = parseInboundFrame(raw);
+      if (frame?.event === 'media') outbound.push(frame.media.payload);
     });
 
     socket.send(startFrame);
     socket.send(mediaFrame('dGVzdC1wYXlsb2Fk'));
 
-    await expect(echoed).resolves.toBe('dGVzdC1wYXlsb2Fk');
+    await settle();
+
+    expect(outbound).toEqual([]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
 
     socket.close();
   });
 
+  /**
+   * Twilio adds message types over time, and an exception raised inside a
+   * socket's `message` handler ends a live phone call.
+   */
   it('ignores an unrecognised event instead of dropping the call', async () => {
     const socket = await connect();
-    const echoed = new Promise<string>((resolve) => {
-      socket.on('message', (raw: Buffer) => {
-        const frame = parseInboundFrame(raw);
-        if (frame?.event === 'media') resolve(frame.media.payload);
-      });
-    });
+    const closed = new Promise<void>((resolve) =>
+      socket.once('close', resolve),
+    );
 
     socket.send(startFrame);
     socket.send(JSON.stringify({ event: 'somethingTwilioAddedLater' }));
     socket.send('{ not even json');
     socket.send(mediaFrame('c3RpbGwtaGVyZQ=='));
 
-    // The echo still arrives, so the socket survived both bad frames.
-    await expect(echoed).resolves.toBe('c3RpbGwtaGVyZQ==');
+    await settle();
+
+    // The socket survived all three, and the process is still standing.
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    await expect(
+      Promise.race([closed, Promise.resolve('still open')]),
+    ).resolves.toBe('still open');
 
     socket.close();
   });

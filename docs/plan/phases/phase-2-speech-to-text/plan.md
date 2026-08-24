@@ -100,6 +100,27 @@ and is not sent on GA. `OpenAI-Safety-Identifier` is optional.
 > transcribes nothing — it looks like silence, not like a configuration error.
 > `null` is sent explicitly rather than the key being omitted, matching the
 > documented example for this model.
+>
+> ---
+>
+> **Superseded during Phase 3, and this is the mistake to learn from.** The above
+> is accurate about `gpt-live-transcribe` and wrong about what to do with it. The
+> error says *this model*; the conclusion drawn was that turn detection was
+> unavailable, and the model was kept.
+>
+> Probed later that day, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`,
+> `gpt-transcribe`, and `whisper-1` **all accept `server_vad`**. Only
+> `gpt-live-transcribe` and `gpt-realtime-whisper` reject it.
+>
+> The cost of not testing a second model: `gpt-live-transcribe` emits no turn
+> boundaries *and* no `.completed`, so Phase 3 shipped an agent that transcribed
+> callers perfectly and never answered them, then needed a bespoke
+> transcript-activity endpointer that added ~1.9 s to every reply.
+> `STT_MODEL` now defaults to `gpt-4o-transcribe`. See
+> [Phase 3's plan](../phase-3-llm-tts-loop/plan.md).
+>
+> The general lesson, since this document argued for it and then did not do it:
+> a vendor error naming *this model* is a prompt to try another one.
 
 The GA API requires this **nested** `session.audio.input` object and rejects the older flat
 `input_audio_format` / `input_audio_transcription` keys. `audio/pcm` @ 24000 is the documented,

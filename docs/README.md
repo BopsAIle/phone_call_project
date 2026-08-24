@@ -21,6 +21,9 @@ workflow, or run `/feature-doc <feature-name>` to scaffold them.
 - [Phase 1 — Audio path](features/phase-1-audio-path.md) — Twilio voice webhook and Media Streams
   gateway, the mu-law codec and anti-aliased resampler, `Call` persistence, the offline replay
   harness, and a browser dev client that speaks Twilio's protocol while the real number is blocked.
+- [Phase 3 — The agent speaks](features/phase-3-llm-tts-loop.md) — the LLM and TTS loop, sentence
+  chunking, the turn state machine, barge-in, and the greeting with its automated-assistant
+  disclosure. Phase 2's change doc was deliberately skipped; its plan is the record.
 
 ## Plans
 
