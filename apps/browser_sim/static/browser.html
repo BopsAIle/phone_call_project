@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Máy ảo tổng đài đặt bàn</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #1c1410;
+      --ink-soft: #3d322b;
+      --muted: #8a7b70;
+      --line: rgba(92, 64, 42, 0.14);
+      --ivory: #f6f0e6;
+      --paper: #fffaf3;
+      --gold: #c4a15a;
+      --gold-deep: #9a7430;
+      --lacquer: #8b2c18;
+      --lacquer-deep: #6a1e10;
+      --green: #2f6b4a;
+      --green-hot: #1f5137;
+      --danger: #b42318;
+      --shadow: 0 24px 60px rgba(28, 20, 16, 0.28);
+      --radius: 28px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Be Vietnam Pro", "Segoe UI", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 700px at 12% -10%, rgba(196, 161, 90, 0.28), transparent 55%),
+        radial-gradient(900px 600px at 100% 10%, rgba(139, 44, 24, 0.22), transparent 50%),
+        radial-gradient(800px 500px at 70% 110%, rgba(47, 107, 74, 0.16), transparent 45%),
+        #16110e;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.07;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+
+    .app {
+      position: relative;
+      z-index: 1;
+      height: 100%;
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 20px 18px 16px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+      color: #f4eadb;
+      flex-shrink: 0;
+    }
+
+    .brand-mark {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .monogram {
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      display: grid;
+      place-items: center;
+      color: #1c1410;
+      background: linear-gradient(160deg, #f0d9a0, var(--gold) 45%, var(--gold-deep));
+      box-shadow: 0 8px 24px rgba(196, 161, 90, 0.28);
+      flex-shrink: 0;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(24px, 3.4vw, 34px);
+      font-weight: 650;
+      letter-spacing: -0.03em;
+      line-height: 1.08;
+    }
+
+    .brand p {
+      margin: 4px 0 0;
+      color: rgba(244, 234, 219, 0.68);
+      font-size: 13px;
+      line-height: 1.45;
+      max-width: 46rem;
+    }
+
+    .hours {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--gold);
+      padding: 8px 12px;
+      border: 1px solid rgba(196, 161, 90, 0.28);
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+
+    .stage {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(260px, 340px) 1fr;
+      gap: 16px;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(255, 250, 243, 0.96), var(--paper));
+      border: 1px solid rgba(255, 236, 210, 0.18);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      min-height: 0;
+    }
+
+    .phone {
+      padding: 22px 22px 18px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: auto;
+    }
+
+    .phone::after {
+      content: "";
+      position: absolute;
+      width: 220px;
+      height: 220px;
+      right: -80px;
+      top: -70px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(196, 161, 90, 0.18), transparent 70%);
+      pointer-events: none;
+    }
+
+    .live-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: rgba(28, 20, 16, 0.05);
+      border-radius: 999px;
+      padding: 7px 12px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #c4b8a8;
+    }
+
+    body.in-call .pill { color: var(--green); background: rgba(47, 107, 74, 0.1); }
+    body.in-call .dot {
+      background: #3d9a63;
+      box-shadow: 0 0 0 0 rgba(61, 154, 99, 0.55);
+      animation: pulse 1.6s ease-out infinite;
+    }
+    body.recording .pill { color: var(--danger); background: rgba(180, 35, 24, 0.1); }
+    body.recording .dot {
+      background: var(--danger);
+      animation: pulse 1s ease-out infinite;
+    }
+
+    #callTimer {
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-soft);
+      font-size: 13px;
+    }
+
+    .host-card {
+      text-align: center;
+      margin: 0 0 18px;
+    }
+
+    .avatar {
+      width: 76px;
+      height: 76px;
+      margin: 0 auto 12px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 30% 25%, #fff1cc, transparent 40%),
+        linear-gradient(160deg, #3a241c, #1a1210);
+      border: 3px solid #f0d9a0;
+      box-shadow: 0 12px 30px rgba(28, 20, 16, 0.18);
+      color: #f0d9a0;
+    }
+
+    .host-card h2 {
+      margin: 0;
+      font-family: Fraunces, Georgia, serif;
+      font-size: 22px;
+      font-weight: 650;
+    }
+
+    .host-card .lede {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .branches {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    .branches span {
+      font-size: 11px;
+      color: var(--gold-deep);
+      background: rgba(196, 161, 90, 0.12);
+      border-radius: 999px;
+      padding: 5px 10px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font: inherit;
+      background: var(--ivory);
+      color: var(--ink);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input:focus, textarea:focus {
+      border-color: rgba(154, 116, 48, 0.55);
+      box-shadow: 0 0 0 4px rgba(196, 161, 90, 0.18);
+    }
+
+    input:disabled, textarea:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    textarea {
+      min-height: 48px;
+      max-height: 120px;
+      resize: none;
+      line-height: 1.45;
+    }
+
+    .dial {
+      margin-top: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding-top: 14px;
+    }
+
+    .talk-wrap {
+      position: relative;
+      width: 136px;
+      height: 136px;
+      display: grid;
+      place-items: center;
+    }
+
+    .rings span {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 1.5px solid rgba(139, 44, 24, 0.18);
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    body.recording .rings span {
+      animation: ring 1.6s ease-out infinite;
+    }
+    body.recording .rings span:nth-child(2) { animation-delay: 0.35s; }
+    body.recording .rings span:nth-child(3) { animation-delay: 0.7s; }
+
+    #talk {
+      position: relative;
+      z-index: 1;
+      width: 108px;
+      height: 108px;
+      border: 0;
+      border-radius: 50%;
+      cursor: pointer;
+      color: #fff;
+      background:
+        radial-gradient(circle at 30% 25%, rgba(255,255,255,0.22), transparent 40%),
+        linear-gradient(180deg, #3f8a5f, var(--green-hot));
+      box-shadow: 0 14px 28px rgba(31, 81, 55, 0.32), inset 0 1px 0 rgba(255,255,255,0.2);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      font: inherit;
+      touch-action: none;
+      user-select: none;
+      transition: transform 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+
+    #talk svg { display: block; }
+    #talk small {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    #talk:hover:not(:disabled) { transform: translateY(-1px) scale(1.02); }
+    #talk:disabled { opacity: 0.38; cursor: not-allowed; box-shadow: none; }
+    #talk.hot, body.recording #talk {
+      background: linear-gradient(180deg, #d6453a, #8f1d16);
+      box-shadow: 0 16px 32px rgba(180, 35, 24, 0.38);
+      transform: scale(0.97);
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      width: 100%;
+    }
+
+    button {
+      border: 0;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: transform 0.12s, opacity 0.12s, background 0.12s;
+    }
+
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+
+    #call {
+      background: linear-gradient(180deg, #8f3a22, var(--lacquer-deep));
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(106, 30, 16, 0.22);
+    }
+
+    #hangup {
+      background: #efe6d8;
+      color: var(--ink-soft);
+    }
+
+    .status {
+      width: 100%;
+      margin: 0;
+      min-height: 38px;
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .chat {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .chat-head {
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .chat-head h3 {
+      margin: 0;
+      font-family: Fraunces, Georgia, serif;
+      font-size: 20px;
+      font-weight: 650;
+    }
+
+    .chat-head span {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .log {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background:
+        linear-gradient(180deg, rgba(246, 240, 230, 0.55), transparent 80px),
+        repeating-linear-gradient(-45deg, transparent, transparent 12px, rgba(28, 20, 16, 0.012) 12px, rgba(28, 20, 16, 0.012) 13px);
+    }
+
+    .empty {
+      margin: auto;
+      text-align: center;
+      max-width: 300px;
+      color: var(--muted);
+      padding: 24px 8px;
+    }
+
+    .empty svg { margin-bottom: 10px; color: var(--gold-deep); }
+    .empty strong {
+      display: block;
+      color: var(--ink-soft);
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .log.has-messages .empty { display: none; }
+
+    .bubble {
+      max-width: 78%;
+      padding: 12px 14px;
+      border-radius: 18px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      animation: rise 0.28s ease;
+    }
+
+    .bubble .who {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .bubble.assistant {
+      align-self: flex-start;
+      background: #fff;
+      border: 1px solid rgba(196, 161, 90, 0.22);
+      border-bottom-left-radius: 6px;
+      box-shadow: 0 8px 18px rgba(28, 20, 16, 0.05);
+    }
+
+    .bubble.user {
+      align-self: flex-end;
+      background: linear-gradient(180deg, #2b221c, #1c1410);
+      color: #f7efe4;
+      border-bottom-right-radius: 6px;
+    }
+
+    .bubble.user .who { color: rgba(240, 217, 160, 0.78); }
+
+    .bubble.pending em {
+      font-style: normal;
+      color: var(--muted);
+    }
+
+    .dots span {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 3px;
+      border-radius: 50%;
+      background: var(--gold-deep);
+      animation: blink 1.1s infinite;
+    }
+    .dots span:nth-child(2) { animation-delay: 0.15s; }
+    .dots span:nth-child(3) { animation-delay: 0.3s; }
+
+    .composer {
+      padding: 12px 16px 14px;
+      border-top: 1px solid var(--line);
+      background: rgba(255, 250, 243, 0.96);
+      flex-shrink: 0;
+    }
+
+    .composer-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    #sendText {
+      height: 48px;
+      min-width: 88px;
+      padding: 0 16px;
+      border-radius: 14px;
+      background: var(--ink);
+      color: #f6f0e6;
+    }
+
+    .hint {
+      margin: 8px 2px 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    @keyframes pulse {
+      70% { box-shadow: 0 0 0 8px rgba(61, 154, 99, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(61, 154, 99, 0); }
+    }
+
+    @keyframes ring {
+      0% { transform: scale(0.82); opacity: 0.55; }
+      100% { transform: scale(1.28); opacity: 0; }
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    @keyframes blink {
+      0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-2px); }
+    }
+
+    @media (max-width: 860px) {
+      html, body, .app { height: auto; min-height: 100%; }
+      .stage {
+        grid-template-columns: 1fr;
+        flex: none;
+      }
+      .brand { align-items: flex-start; flex-direction: column; }
+      .phone { max-height: none; }
+      .chat { min-height: 62vh; }
+      .log { min-height: 240px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="brand">
+      <div class="brand-mark">
+        <div class="monogram" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M6 4h4l2 5-2.5 1.5a12 12 0 0 0 6 6L17 14l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 4 6a2 2 0 0 1 2-2z" />
+          </svg>
+        </div>
+        <div>
+          <h1>Máy ảo tổng đài đặt bàn</h1>
+          <p>Mô phỏng cuộc gọi — chuỗi demo có 2 chi nhánh, chưa gắn thương hiệu thật. Gõ chữ hoặc nói đều được.</p>
+        </div>
+      </div>
+      <div class="hours">11:00–22:00 mỗi ngày</div>
+    </header>
+
+    <div class="stage">
+      <section class="panel phone">
+        <div class="live-row">
+          <div class="pill"><span class="dot"></span><span id="liveLabel">Chưa kết nối</span></div>
+          <div id="callTimer">00:00</div>
+        </div>
+
+        <div class="host-card">
+          <div class="avatar" aria-hidden="true">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M6 4h4l2 5-2.5 1.5a12 12 0 0 0 6 6L17 14l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 4 6a2 2 0 0 1 2-2z" />
+            </svg>
+          </div>
+          <h2>Tổng đài </h2>
+          <p class="lede">Demo đặt bàn qua điện thoại<br />không phải chuỗi nhà hàng có thương hiệu</p>
+          <div class="branches">
+            <span>Quận 1 · 40 chỗ</span>
+            <span>Thảo Điền · 24 chỗ</span>
+          </div>
+        </div>
+
+        <label for="fromNumber">Số điện thoại</label>
+        <input id="fromNumber" placeholder="0901234567" autocomplete="tel" />
+
+        <div class="dial">
+          <div class="talk-wrap">
+            <div class="rings" aria-hidden="true"><span></span><span></span><span></span></div>
+            <button id="talk" type="button" disabled title="Giữ để nói">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <rect x="9" y="3" width="6" height="11" rx="3" />
+                <path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6" />
+              </svg>
+              <small id="talkLabel">Giữ để nói</small>
+            </button>
+          </div>
+          <div class="actions">
+            <button id="call" type="button">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 4h4l2 5-2.5 1.5a12 12 0 0 0 6 6L17 14l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 4 6a2 2 0 0 1 2-2z" />
+              </svg>
+              Nhấc máy
+            </button>
+            <button id="hangup" type="button" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 15c4-3 12-3 16 0" />
+                <path d="M8 18l-3-1M16 18l3-1" />
+              </svg>
+              Cúp máy
+            </button>
+          </div>
+          <p class="status" id="status">Gõ bên phải rồi gửi, hoặc nhấc máy rồi giữ micro.</p>
+        </div>
+      </section>
+
+      <section class="panel chat">
+        <div class="chat-head">
+          <h3>Hội thoại</h3>
+          <span>Gõ chữ hoặc nói</span>
+        </div>
+        <div class="log" id="log">
+          <div class="empty" id="logEmpty">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M4 6h16v10H8l-4 4V6z" />
+            </svg>
+            <strong>Gõ tin nhắn bên dưới</strong>
+            Không cần nhấc máy trước. Enter để gửi, hệ thống tự mở cuộc gọi.
+          </div>
+        </div>
+        <div class="composer">
+          <label for="typed">Nhắn cho lễ tân</label>
+          <div class="composer-row">
+            <textarea id="typed" placeholder="Ví dụ: 4 người ngày mai 19 giờ Quận 1" rows="2"></textarea>
+            <button id="sendText" type="button" title="Gửi câu nói">Gửi</button>
+          </div>
+          <p class="hint">Enter gửi · Shift+Enter xuống dòng · có thể chat trước khi nhấc máy</p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const EMPTY_HTML = '<div class="empty" id="logEmpty"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h16v10H8l-4 4V6z" /></svg><strong>Gõ tin nhắn bên dưới</strong>Không cần nhấc máy trước. Enter để gửi, hệ thống tự mở cuộc gọi.</div>';
+    const state = { sessionId: null, recording: false, recorder: null, chunks: [], busy: false, startedAt: 0, tick: null };
+
+    function setStatus(text) { el("status").textContent = text; }
+
+    function setLive(text) { el("liveLabel").textContent = text; }
+
+    function formatClock(ms) {
+      const total = Math.floor(ms / 1000);
+      const m = String(Math.floor(total / 60)).padStart(2, "0");
+      const s = String(total % 60).padStart(2, "0");
+      return m + ":" + s;
+    }
+
+    function startClock() {
+      stopClock();
+      state.startedAt = Date.now();
+      el("callTimer").textContent = "00:00";
+      state.tick = setInterval(() => {
+        el("callTimer").textContent = formatClock(Date.now() - state.startedAt);
+      }, 1000);
+    }
+
+    function stopClock() {
+      if (state.tick) clearInterval(state.tick);
+      state.tick = null;
+    }
+
+    function addBubble(role, text) {
+      if (!text) return;
+      el("log").classList.add("has-messages");
+      const wrap = document.createElement("div");
+      wrap.className = "bubble " + role;
+      wrap.innerHTML = '<div class="who">' + (role === "user" ? "Bạn" : "Lễ tân") + "</div>";
+      wrap.append(document.createTextNode(text));
+      el("log").appendChild(wrap);
+      el("log").scrollTop = el("log").scrollHeight;
+    }
+
+    function setInCall(on) {
+      document.body.classList.toggle("in-call", on);
+      el("call").disabled = on;
+      el("hangup").disabled = !on;
+      el("talk").disabled = !on || state.busy;
+      el("sendText").disabled = state.busy;
+      el("typed").disabled = false;
+      if (on) {
+        setLive("Đang gọi");
+      } else {
+        document.body.classList.remove("recording");
+        setLive(state.sessionId ? "Đang gọi" : "Đã cúp máy");
+        if (!state.sessionId) stopClock();
+      }
+    }
+
+    function setBusy(on) {
+      state.busy = on;
+      el("talk").disabled = !state.sessionId || on;
+      el("typed").disabled = false;
+      el("sendText").disabled = on;
+      el("call").disabled = on || !!state.sessionId;
+      el("hangup").disabled = on || !state.sessionId;
+    }
+
+    async function playMp3(b64) {
+      if (!b64) return;
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      try { await audio.play(); } catch (err) { URL.revokeObjectURL(url); }
+    }
+
+    function addPending() {
+      removePending();
+      el("log").classList.add("has-messages");
+      const wrap = document.createElement("div");
+      wrap.id = "pendingBubble";
+      wrap.className = "bubble assistant pending";
+      wrap.innerHTML = '<div class="who">Lễ tân</div><em>Đang trả lời <span class="dots"><span></span><span></span><span></span></span></em>';
+      el("log").appendChild(wrap);
+      el("log").scrollTop = el("log").scrollHeight;
+    }
+
+    function removePending() {
+      const node = document.getElementById("pendingBubble");
+      if (node) node.remove();
+    }
+
+    function resetLog() {
+      el("log").innerHTML = EMPTY_HTML;
+      el("log").classList.remove("has-messages");
+    }
+
+    async function startCall() {
+      if (state.sessionId || state.busy) return false;
+      setBusy(true);
+      setStatus("Đang kết nối tổng đài...");
+      addPending();
+      try {
+        const res = await fetch("/browser/voice", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ from_number: el("fromNumber").value.trim() || null }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : (res.statusText));
+        state.sessionId = data.session_id;
+        resetLog();
+        setInCall(true);
+        startClock();
+        addBubble("assistant", data.assistant_text);
+        setStatus("Đã kết nối. Gõ tin nhắn hoặc giữ nút mic để nói.");
+        setBusy(false);
+        playMp3(data.audio_b64);
+        return true;
+      } catch (err) {
+        removePending();
+        setStatus("Không gọi được: " + err.message);
+        setBusy(false);
+        return false;
+      }
+    }
+
+    async function sendUtterance(payload) {
+      if (!state.sessionId) return;
+      const typed = (payload.text || "").trim();
+      if (typed) addBubble("user", typed);
+      setBusy(true);
+      setStatus(typed ? "Đang gửi tin nhắn..." : "Đang gửi giọng nói...");
+      addPending();
+      try {
+        const res = await fetch("/browser/" + state.sessionId + "/utterance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : (res.statusText));
+        removePending();
+        if (data.user_text && data.user_text !== typed) addBubble("user", data.user_text);
+        addBubble("assistant", data.assistant_text);
+        if (data.ended) {
+          setStatus("Cuộc gọi kết thúc (" + data.action + ").");
+          state.sessionId = null;
+          setInCall(false);
+          setLive("Kết thúc");
+        } else {
+          setStatus("Lễ tân đã trả lời. Tiếp tục gõ hoặc nói.");
+        }
+        setBusy(false);
+        playMp3(data.audio_b64);
+      } catch (err) {
+        removePending();
+        setStatus("Lỗi gửi câu nói: " + err.message);
+        setBusy(false);
+      }
+    }
+
+    async function sendTyped() {
+      const text = el("typed").value.trim();
+      if (!text || state.busy) return;
+      el("typed").value = "";
+      if (!state.sessionId) {
+        const ok = await startCall();
+        if (!ok) {
+          el("typed").value = text;
+          return;
+        }
+      }
+      await sendUtterance({ text });
+    }
+
+    function pickMime() {
+      const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+      return types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          resolve(result.includes(",") ? result.split(",")[1] : result);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function beginTalk(ev) {
+      ev.preventDefault();
+      if (!state.sessionId || state.busy || state.recording) return;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mime = pickMime();
+        state.chunks = [];
+        state.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+        state.recorder.ondataavailable = (e) => { if (e.data.size) state.chunks.push(e.data); };
+        state.recorder.start();
+        state.recording = true;
+        try { el("talk").setPointerCapture(ev.pointerId); } catch (err) {}
+        el("talk").classList.add("hot");
+        document.body.classList.add("recording");
+        el("talkLabel").textContent = "Thả để gửi";
+        setLive("Đang nghe");
+        setStatus("Đang ghi âm. Thả nút để gửi câu nói.");
+      } catch (err) {
+        setStatus("Không mở được micro: " + err.message);
+      }
+    }
+
+    async function endTalk(ev) {
+      ev.preventDefault();
+      if (!state.recording || !state.recorder) return;
+      const recorder = state.recorder;
+      const mime = recorder.mimeType || "audio/webm";
+      const blob = await new Promise((resolve) => {
+        recorder.onstop = () => {
+          recorder.stream.getTracks().forEach((t) => t.stop());
+          resolve(new Blob(state.chunks, { type: mime }));
+        };
+        recorder.stop();
+      });
+      state.recording = false;
+      state.recorder = null;
+      el("talk").classList.remove("hot");
+      document.body.classList.remove("recording");
+      el("talkLabel").textContent = "Giữ để nói";
+      if (state.sessionId) setLive("Đang gọi");
+      if (blob.size < 800) {
+        setStatus("Đoạn ghi quá ngắn, thử nói lại.");
+        return;
+      }
+      const ext = mime.includes("mp4") ? "speech.mp4" : "speech.webm";
+      await sendUtterance({
+        audio_b64: await blobToBase64(blob),
+        audio_filename: ext,
+      });
+    }
+
+    el("call").addEventListener("click", startCall);
+    el("hangup").addEventListener("click", () => {
+      state.sessionId = null;
+      setInCall(false);
+      setStatus("Đã cúp máy. Gõ tin nhắn để mở cuộc gọi mới.");
+    });
+    el("sendText").addEventListener("click", sendTyped);
+    el("typed").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        sendTyped();
+      }
+    });
+    el("talk").addEventListener("pointerdown", beginTalk);
+    el("talk").addEventListener("pointerup", endTalk);
+    el("talk").addEventListener("pointercancel", endTalk);
+    el("talk").addEventListener("contextmenu", (e) => e.preventDefault());
+  </script>
+</body>
+</html>

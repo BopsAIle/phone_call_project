@@ -1,0 +1,33 @@
+services:
+  booking-api:
+    build: .
+    command: python -m apps.booking_api
+    ports:
+      - "8001:8001"
+    environment:
+      MULTI_BRANCH: "true"
+
+  voice-agent:
+    build: .
+    command: python -m apps.voice_agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      BOOKING_API_URL: http://booking-api:8001
+    depends_on:
+      - booking-api
+
+  browser-sim:
+    build: .
+    command: python -m apps.browser_sim
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      BOOKING_API_URL: http://booking-api:8001
+      VOICE_AGENT_URL: http://voice-agent:8000
+    depends_on:
+      - voice-agent

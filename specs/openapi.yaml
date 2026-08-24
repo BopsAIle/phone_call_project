@@ -1,0 +1,175 @@
+openapi: 3.0.3
+info:
+  title: Restaurant Booking API
+  version: 0.1.0
+  description: Mock/real backend contract used by the Phone AI voice agent.
+paths:
+  /v1/call-sessions:
+    post:
+      summary: Create a call session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallSession"
+  /v1/call-sessions/{session_id}:
+    get:
+      summary: Get session
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session
+  /v1/call-sessions/{session_id}/slots:
+    patch:
+      summary: Save slot delta extracted from the current turn
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SlotDelta"
+      responses:
+        "200":
+          description: Updated slots plus missing fields
+  /v1/availability/check:
+    post:
+      summary: Check remaining seats for guest_count + date + time + branch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AvailabilityRequest"
+      responses:
+        "200":
+          description: Availability and alternatives
+  /v1/bookings:
+    post:
+      summary: Create a booking after the guest confirms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBookingRequest"
+      responses:
+        "200":
+          description: Booking created
+        "400":
+          description: Missing required fields
+        "409":
+          description: No availability
+  /v1/call-sessions/{session_id}/transfer:
+    post:
+      summary: Mark the call as transferred to staff
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transferred session
+  /v1/recordings/by-call/{call_sid}:
+    patch:
+      summary: Attach a recording id to the session by call_sid
+      parameters:
+        - in: path
+          name: call_sid
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session with recording_id
+components:
+  schemas:
+    CreateSessionRequest:
+      type: object
+      properties:
+        call_sid:
+          type: string
+        from_number:
+          type: string
+        recording_id:
+          type: string
+        multi_branch:
+          type: boolean
+          default: true
+    SlotDelta:
+      type: object
+      properties:
+        guest_count:
+          type: integer
+        date:
+          type: string
+          format: date
+        time:
+          type: string
+          format: time
+        branch:
+          type: string
+        customer_name:
+          type: string
+        phone:
+          type: string
+        notes:
+          type: string
+    AvailabilityRequest:
+      type: object
+      required: [guest_count, date, time, branch]
+      properties:
+        session_id:
+          type: string
+        guest_count:
+          type: integer
+        date:
+          type: string
+          format: date
+        time:
+          type: string
+          format: time
+        branch:
+          type: string
+    CreateBookingRequest:
+      type: object
+      required: [session_id]
+      properties:
+        session_id:
+          type: string
+        recording_id:
+          type: string
+        source:
+          type: string
+          default: Phone AI
+    CallSession:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        slots:
+          type: object
+        recording_id:
+          type: string
