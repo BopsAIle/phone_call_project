@@ -6,12 +6,20 @@ import {
   type SessionConfig,
 } from './realtime-events.types';
 
-/** What we actually send: gpt-live-transcribe rejects turn detection. */
+const VAD = { threshold: 0.5, prefixPaddingMs: 300, silenceDurationMs: 500 };
+
+/** What we actually send: the default model endpoints turns for us. */
 const config: SessionConfig = {
-  model: 'gpt-live-transcribe',
-  languages: ['en'],
+  model: 'gpt-4o-transcribe',
+  locale: 'en',
   delay: 'low',
-  turnDetection: null,
+  turnDetection: VAD,
+};
+
+/** The outlier dialect, still a valid STT_MODEL. */
+const liveTranscribeConfig: SessionConfig = {
+  ...config,
+  model: 'gpt-live-transcribe',
 };
 
 describe('parseServerEvent', () => {
@@ -181,49 +189,7 @@ describe('sessionUpdate', () => {
         audio: {
           input: {
             format: { type: 'audio/pcm', rate: 24000 },
-            transcription: {
-              model: 'gpt-live-transcribe',
-              languages: ['en'],
-              delay: 'low',
-            },
-            turn_detection: null,
-          },
-        },
-      },
-    });
-  });
-
-  /**
-   * Verified against a live session: `gpt-live-transcribe` answers a
-   * `server_vad` block with `Turn detection is not supported for this
-   * transcription model. (invalid_value)`, and the whole `session.update` is
-   * rejected — so the session opens and then transcribes nothing.
-   *
-   * `null` is sent explicitly rather than the key being omitted, matching the
-   * documented example for this model.
-   */
-  it('sends turn_detection as an explicit null for a model that rejects it', () => {
-    const raw = sessionUpdate(config);
-
-    expect(raw).toContain('"turn_detection":null');
-    expect(raw).not.toContain('server_vad');
-  });
-
-  /** The shape still works for models that do accept it. */
-  it('serialises turn detection when one is configured', () => {
-    const raw = sessionUpdate({
-      ...config,
-      turnDetection: {
-        threshold: 0.5,
-        prefixPaddingMs: 300,
-        silenceDurationMs: 500,
-      },
-    });
-
-    expect(JSON.parse(raw)).toMatchObject({
-      session: {
-        audio: {
-          input: {
+            transcription: { model: 'gpt-4o-transcribe', language: 'en' },
             turn_detection: {
               type: 'server_vad',
               threshold: 0.5,
@@ -236,6 +202,76 @@ describe('sessionUpdate', () => {
     });
   });
 
+  /**
+   * Each model rejects the other's keys outright, and the failure is quiet: the
+   * whole `session.update` is refused, the socket stays open, and the session
+   * then transcribes nothing. That reads as silence rather than a configuration
+   * error, which is exactly how it survived two phases unnoticed.
+   *
+   * Probed against live sessions on 2026-08-21.
+   */
+  describe('per-model dialects', () => {
+    it('sends language singular, and no delay, for gpt-4o-transcribe', () => {
+      const raw = sessionUpdate(config);
+
+      expect(JSON.parse(raw)).toMatchObject({
+        session: {
+          audio: {
+            input: { transcription: { language: 'en' } },
+          },
+        },
+      });
+      expect(raw).not.toContain('"languages"');
+      expect(raw).not.toContain('"delay"');
+    });
+
+    it('sends languages as an array, with delay, for gpt-live-transcribe', () => {
+      const raw = sessionUpdate(liveTranscribeConfig);
+
+      expect(JSON.parse(raw)).toMatchObject({
+        session: {
+          audio: {
+            input: {
+              transcription: {
+                model: 'gpt-live-transcribe',
+                languages: ['en'],
+                delay: 'low',
+              },
+            },
+          },
+        },
+      });
+      expect(raw).not.toContain('"language"');
+    });
+
+    /**
+     * `gpt-live-transcribe` answers a `server_vad` block with `Turn detection is
+     * not supported for this transcription model. (invalid_value)`. `null` is
+     * sent explicitly rather than omitted, matching its documented example.
+     */
+    it('drops turn detection for a model that rejects it, even when configured', () => {
+      const raw = sessionUpdate(liveTranscribeConfig);
+
+      expect(raw).toContain('"turn_detection":null');
+      expect(raw).not.toContain('server_vad');
+    });
+
+    it('treats an unknown model as the common dialect rather than throwing', () => {
+      // STT_MODEL is configuration, so an unlisted value has to boot.
+      const raw = sessionUpdate({ ...config, model: 'gpt-transcribe-9000' });
+
+      expect(raw).toContain('"language":"en"');
+      expect(raw).toContain('server_vad');
+    });
+  });
+
+  it('omits turn detection when none is configured', () => {
+    const raw = sessionUpdate({ ...config, turnDetection: null });
+
+    expect(raw).toContain('"turn_detection":null');
+    expect(raw).not.toContain('server_vad');
+  });
+
   it('carries none of the beta-era flat keys', () => {
     const raw = sessionUpdate(config);
 
@@ -246,20 +282,14 @@ describe('sessionUpdate', () => {
     expect(raw).not.toContain('interrupt_response');
   });
 
-  it('sends languages as an array, never the singular field', () => {
-    const message = JSON.parse(
-      sessionUpdate({ ...config, languages: ['de'] }),
-    ) as {
-      session: {
-        audio: {
-          input: { transcription: { languages?: string[]; language?: string } };
-        };
-      };
-    };
-    const { transcription } = message.session.audio.input;
-
-    expect(transcription.languages).toEqual(['de']);
-    expect(transcription.language).toBeUndefined();
+  /** The Phase 5 locale hook, through both dialects. */
+  it('carries the locale through for either dialect', () => {
+    expect(sessionUpdate({ ...config, locale: 'de' })).toContain(
+      '"language":"de"',
+    );
+    expect(sessionUpdate({ ...liveTranscribeConfig, locale: 'de' })).toContain(
+      '"languages":["de"]',
+    );
   });
 });
 

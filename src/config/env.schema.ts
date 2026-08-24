@@ -38,7 +38,13 @@ export const envSchema = z.object({
   DEFAULT_LOCALE: z.enum(['en', 'de']).default('en'),
 
   LLM_MODEL: z.string().default('gpt-5.6-terra'),
-  STT_MODEL: z.string().default('gpt-live-transcribe'),
+  /**
+   * Must be a model that supports `turn_detection`, or the session falls back to
+   * transcript-activity endpointing and every reply is ~2.5 s slower.
+   * `gpt-live-transcribe` and `gpt-realtime-whisper` do not; see
+   * src/stt/realtime-events.types.ts for the probed table.
+   */
+  STT_MODEL: z.string().default('gpt-4o-transcribe'),
   TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
   TTS_VOICE: z.string().default('marin'),
 });

@@ -1,6 +1,11 @@
+import type { ConfigService } from '@nestjs/config';
+import type { OpenAiLlmService } from '../llm/openai-llm.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { OpenAiRealtimeSttService } from '../stt/openai-realtime-stt.service';
 import type { SttSession } from '../stt/stt.provider';
+import type { GreetingCache } from '../tts/greeting-cache';
+import type { OpenAiTtsService } from '../tts/openai-tts.service';
+import type { OutboundAudioSink } from './audio-sink';
 import { ConversationService } from './conversation.service';
 
 /**
@@ -22,12 +27,36 @@ function stubSttSession(close = jest.fn().mockResolvedValue(undefined)) {
   return { session, close };
 }
 
+// Held separately rather than read back off the object, for the same reason
+// the STT close mock is.
+const playFrame = jest.fn();
+const sink: OutboundAudioSink = {
+  playFrame,
+  mark: jest.fn(),
+  clear: jest.fn(),
+};
+
+/** Everything `create` needs beyond the ids, which no test varies. */
+const STORE = {
+  greeting: 'Hello, you are speaking with an automated assistant.',
+  storeName: 'Trattoria Bella',
+  timezone: 'Europe/Berlin',
+  sink,
+};
+
 function build(stt = stubSttSession()) {
   const createSession = jest.fn().mockResolvedValue(stt.session);
 
   const service = new ConversationService(
     { createSession } as unknown as OpenAiRealtimeSttService,
+    { respond: jest.fn() } as unknown as OpenAiLlmService,
+    { synthesize: jest.fn() } as unknown as OpenAiTtsService,
+    { frames: jest.fn().mockResolvedValue([]) } as unknown as GreetingCache,
     { utterance: { create: jest.fn() } } as unknown as PrismaService,
+    { get: jest.fn().mockReturnValue('en') } as unknown as ConfigService<
+      never,
+      true
+    >,
   );
 
   return { service, createSession, close: stt.close };
@@ -40,6 +69,7 @@ describe('ConversationService', () => {
     const created = await service.create({
       callId: 'call_1',
       streamSid: 'MZ1',
+      ...STORE,
     });
 
     expect(service.get('MZ1')).toBe(created);
@@ -53,12 +83,36 @@ describe('ConversationService', () => {
       callId: 'call_1',
       streamSid: 'MZ1',
       locale: 'de',
+      ...STORE,
     });
 
     expect(createSession).toHaveBeenCalledWith({
       callId: 'call_1',
       locale: 'de',
     });
+  });
+
+  it('falls back to the configured default locale', async () => {
+    const { service, createSession } = build();
+
+    await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
+
+    expect(createSession).toHaveBeenCalledWith({
+      callId: 'call_1',
+      locale: 'en',
+    });
+  });
+
+  /**
+   * The greeting is the gateway's call to make, after the session is registered
+   * — otherwise a mark echoing back off it has nowhere to land.
+   */
+  it('does not play the greeting on create', async () => {
+    const { service } = build();
+
+    await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
+
+    expect(playFrame).not.toHaveBeenCalled();
   });
 
   it('returns undefined for a stream it does not know', () => {
@@ -70,8 +124,16 @@ describe('ConversationService', () => {
   it('keeps concurrent calls separate', async () => {
     const { service } = build();
 
-    const first = await service.create({ callId: 'c1', streamSid: 'MZ1' });
-    const second = await service.create({ callId: 'c2', streamSid: 'MZ2' });
+    const first = await service.create({
+      callId: 'c1',
+      streamSid: 'MZ1',
+      ...STORE,
+    });
+    const second = await service.create({
+      callId: 'c2',
+      streamSid: 'MZ2',
+      ...STORE,
+    });
 
     expect(first).not.toBe(second);
     expect(service.get('MZ1')).toBe(first);
@@ -81,7 +143,7 @@ describe('ConversationService', () => {
   describe('destroy', () => {
     it('closes the session and forgets it', async () => {
       const { service, close } = build();
-      await service.create({ callId: 'call_1', streamSid: 'MZ1' });
+      await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
 
       await service.destroy('MZ1');
 
@@ -96,7 +158,7 @@ describe('ConversationService', () => {
      */
     it('is idempotent', async () => {
       const { service, close } = build();
-      await service.create({ callId: 'call_1', streamSid: 'MZ1' });
+      await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
 
       await service.destroy('MZ1');
       await expect(service.destroy('MZ1')).resolves.toBeUndefined();
@@ -117,7 +179,7 @@ describe('ConversationService', () => {
           jest.fn().mockRejectedValue(new Error('socket already gone')),
         ),
       );
-      await service.create({ callId: 'call_1', streamSid: 'MZ1' });
+      await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
 
       await expect(service.destroy('MZ1')).resolves.toBeUndefined();
       expect(service.get('MZ1')).toBeUndefined();

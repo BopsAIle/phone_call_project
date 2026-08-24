@@ -5,11 +5,18 @@ import {
 } from './openai-realtime-stt.service';
 import type { SessionConfig } from './realtime-events.types';
 
+/**
+ * The fallback dialect on purpose.
+ *
+ * `gpt-live-transcribe` reports no turn boundaries, so a session built from this
+ * exercises the transcript-activity gate. The VAD path is covered by the tests
+ * that emit `speech_started` — the session adopts VAD from the events it
+ * receives, not from its config, so one fixture drives both.
+ */
 const CONFIG: SessionConfig = {
   model: 'gpt-live-transcribe',
-  languages: ['en'],
+  locale: 'en',
   delay: 'low',
-  // gpt-live-transcribe chunks audio itself and rejects an explicit block.
   turnDetection: null,
 };
 
@@ -288,32 +295,68 @@ describe('OpenAiSttSession', () => {
     });
   });
 
-  describe('events', () => {
-    it('routes partials and finals to their callbacks', () => {
-      const { session, socket } = harness();
-      socket.open();
+  /**
+   * `gpt-live-transcribe` emits **no** boundary events: no `speech_started`, no
+   * `speech_stopped`, and no `.completed` unless the client commits. Verified
+   * against a live session on 2026-08-21 — a full sentence plus four seconds of
+   * trailing silence produced nothing but deltas.
+   *
+   * So turn boundaries come from the transcript going quiet, and these cover
+   * that gate. The tests this replaced asserted the VAD-driven behaviour, and
+   * passed against a fake socket that emitted events the real one never sends.
+   */
+  /**
+   * The preferred path since the model switch. `gpt-4o-transcribe` and friends
+   * report turn boundaries themselves, which is both faster and more accurate
+   * than watching the transcript go quiet — VAD hears the audio stop, the gate
+   * has to wait for the decoder to catch up first.
+   *
+   * Measured live on 2026-08-21: `speech_stopped` at +548 ms after the caller
+   * fell silent and `.completed` at +1133 ms, against 3700 ms for the gate.
+   */
+  describe('server VAD', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
 
-      const partials: string[] = [];
-      const finals: string[] = [];
-      session.onPartial((text) => partials.push(text));
-      session.onFinal((text) => finals.push(text));
-
+    function speak(socket: FakeSocket, transcript: string): void {
+      socket.receive({
+        type: 'input_audio_buffer.speech_started',
+        audio_start_ms: 1200,
+      });
       socket.receive({
         type: 'conversation.item.input_audio_transcription.delta',
-        delta: 'a table for',
+        delta: transcript,
+      });
+      socket.receive({
+        type: 'input_audio_buffer.speech_stopped',
+        audio_end_ms: 3400,
       });
       socket.receive({
         type: 'conversation.item.input_audio_transcription.completed',
-        transcript: 'a table for four',
+        transcript,
+      });
+    }
+
+    it('emits the final from .completed, with the VAD boundaries', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      const meta = jest.fn();
+      session.onFinal((text, m) => {
+        finals.push(text);
+        meta(m);
       });
 
-      expect(partials).toEqual(['a table for']);
+      speak(socket, 'a table for four');
+
       expect(finals).toEqual(['a table for four']);
+      expect(meta).toHaveBeenCalledWith({ startMs: 1200, endMs: 3400 });
 
       void session.close();
     });
 
-    it('fires the speech callbacks — phase 3 barge-in depends on it', () => {
+    it('routes the speech callbacks straight from the model', () => {
       const { session, socket } = harness();
       socket.open();
 
@@ -322,14 +365,7 @@ describe('OpenAiSttSession', () => {
       session.onSpeechStarted(started);
       session.onSpeechStopped(stopped);
 
-      socket.receive({
-        type: 'input_audio_buffer.speech_started',
-        audio_start_ms: 100,
-      });
-      socket.receive({
-        type: 'input_audio_buffer.speech_stopped',
-        audio_end_ms: 900,
-      });
+      speak(socket, 'hello');
 
       expect(started).toHaveBeenCalledTimes(1);
       expect(stopped).toHaveBeenCalledTimes(1);
@@ -337,35 +373,130 @@ describe('OpenAiSttSession', () => {
       void session.close();
     });
 
-    it('reports the VAD boundaries as the final transcript timestamps', () => {
+    /**
+     * The one thing that must never happen. Both endpointers emitting for the
+     * same utterance means the conversation layer answers twice, talking over
+     * itself — the exact failure the turn state machine exists to prevent.
+     */
+    it('disarms the transcript gate, so only one final is emitted', () => {
       const { session, socket } = harness();
       socket.open();
 
-      const meta = jest.fn();
-      session.onFinal((_text, m) => {
-        meta(m);
-      });
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
 
-      socket.receive({
-        type: 'input_audio_buffer.speech_started',
-        audio_start_ms: 1200,
-      });
-      socket.receive({
-        type: 'input_audio_buffer.speech_stopped',
-        audio_end_ms: 3400,
-      });
-      socket.receive({
-        type: 'conversation.item.input_audio_transcription.completed',
-        transcript: 'four please',
-      });
+      speak(socket, 'a table for four');
+      // Far longer than the gate's window would have needed.
+      jest.advanceTimersByTime(10000);
 
-      expect(meta).toHaveBeenCalledWith({ startMs: 1200, endMs: 3400 });
+      expect(finals).toEqual(['a table for four']);
 
       void session.close();
     });
 
-    /** The documented fallback for the field this phase has not yet seen live. */
-    it('falls back to the audio clock when the VAD timestamps are absent', () => {
+    /**
+     * Deltas can arrive before the first boundary event, arming the gate. It has
+     * to be cancelled when VAD takes over, or it fires partway through the
+     * VAD-driven turn and emits a duplicate.
+     */
+    it('cancels a gate already armed by earlier deltas', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      socket.receive({
+        type: 'conversation.item.input_audio_transcription.delta',
+        delta: 'an early',
+      });
+      speak(socket, 'a table for four');
+      jest.advanceTimersByTime(10000);
+
+      expect(finals).toEqual(['a table for four']);
+
+      void session.close();
+    });
+
+    it('reports partials cumulatively while speech is in progress', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const partials: string[] = [];
+      session.onPartial((text) => partials.push(text));
+
+      socket.receive({
+        type: 'input_audio_buffer.speech_started',
+        audio_start_ms: 0,
+      });
+      for (const delta of [' a', ' table']) {
+        socket.receive({
+          type: 'conversation.item.input_audio_transcription.delta',
+          delta,
+        });
+      }
+
+      expect(partials).toEqual(['a', 'a table']);
+
+      void session.close();
+    });
+
+    /**
+     * `.completed` for one utterance routinely arrives *after* `speech_started`
+     * for the next, so reading the most recent boundary at completion time
+     * attributes one turn's timestamps to another. Observed live on 2026-08-21:
+     * two consecutive utterances both reported `startMs: 2476`, which would put
+     * the transcript out of order in the database.
+     */
+    it('attributes boundaries to the right utterance when they interleave', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const meta: { startMs: number; endMs: number }[] = [];
+      session.onFinal((_text, m) => meta.push(m));
+
+      socket.receive({
+        type: 'input_audio_buffer.speech_started',
+        item_id: 'item_1',
+        audio_start_ms: 1000,
+      });
+      socket.receive({
+        type: 'input_audio_buffer.speech_stopped',
+        item_id: 'item_1',
+        audio_end_ms: 2000,
+      });
+
+      // The next turn begins before the previous transcript lands.
+      socket.receive({
+        type: 'input_audio_buffer.speech_started',
+        item_id: 'item_2',
+        audio_start_ms: 3000,
+      });
+      socket.receive({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item_1',
+        transcript: 'first',
+      });
+      socket.receive({
+        type: 'input_audio_buffer.speech_stopped',
+        item_id: 'item_2',
+        audio_end_ms: 4000,
+      });
+      socket.receive({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item_2',
+        transcript: 'second',
+      });
+
+      expect(meta).toEqual([
+        { startMs: 1000, endMs: 2000 },
+        { startMs: 3000, endMs: 4000 },
+      ]);
+
+      void session.close();
+    });
+
+    it('falls back to the audio clock when an item is unknown', () => {
       const { session, socket } = harness();
       socket.open();
 
@@ -375,19 +506,217 @@ describe('OpenAiSttSession', () => {
       });
 
       for (let i = 0; i < 25; i++) session.pushAudio(frame());
-
-      socket.receive({ type: 'input_audio_buffer.speech_started' });
-      socket.receive({ type: 'input_audio_buffer.speech_stopped' });
+      socket.receive({
+        type: 'input_audio_buffer.speech_started',
+        audio_start_ms: 100,
+      });
       socket.receive({
         type: 'conversation.item.input_audio_transcription.completed',
-        transcript: 'four please',
+        item_id: 'never-announced',
+        transcript: 'orphaned',
       });
 
-      expect(meta).toHaveBeenCalledWith({ startMs: 500, endMs: 500 });
+      expect(meta).toHaveBeenCalledWith({ startMs: 100, endMs: 500 });
 
       void session.close();
     });
 
+    it('keeps utterances separate across turns', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      speak(socket, 'first');
+      speak(socket, 'second');
+
+      expect(finals).toEqual(['first', 'second']);
+
+      void session.close();
+    });
+  });
+
+  describe('endpointing', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    /** Speaks `words` as separate deltas, `gapMs` apart, as the API does. */
+    function say(socket: FakeSocket, words: string[], gapMs = 250): void {
+      for (const delta of words) {
+        socket.receive({
+          type: 'conversation.item.input_audio_transcription.delta',
+          delta,
+        });
+        jest.advanceTimersByTime(gapMs);
+      }
+    }
+
+    it('emits a final once the transcript goes quiet', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      say(socket, [' a', ' table', ' for', ' four']);
+      expect(finals).toEqual([]);
+
+      jest.advanceTimersByTime(1200);
+
+      expect(finals).toEqual(['a table for four']);
+
+      void session.close();
+    });
+
+    /** Median gap 251 ms, p90 418 ms, max 660 ms on the verified session. */
+    it('does not split on the gaps between words within a sentence', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      say(socket, [' a', ' table'], 1100);
+      jest.advanceTimersByTime(1200);
+
+      expect(finals).toEqual(['a table']);
+
+      void session.close();
+    });
+
+    it('reports partials cumulatively, as the sentence so far', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const partials: string[] = [];
+      session.onPartial((text) => partials.push(text));
+
+      say(socket, [' a', ' table', ' for']);
+
+      expect(partials).toEqual(['a', 'a table', 'a table for']);
+
+      void session.close();
+    });
+
+    it('fires speech started on the first word and stopped at the boundary', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const started = jest.fn();
+      const stopped = jest.fn();
+      session.onSpeechStarted(started);
+      session.onSpeechStopped(stopped);
+
+      say(socket, [' hello', ' there']);
+      expect(started).toHaveBeenCalledTimes(1);
+      expect(stopped).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(1200);
+      expect(stopped).toHaveBeenCalledTimes(1);
+
+      // A second utterance starts a second turn.
+      say(socket, [' again']);
+      expect(started).toHaveBeenCalledTimes(2);
+
+      void session.close();
+    });
+
+    it('timestamps the utterance from the audio clock', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const meta = jest.fn();
+      session.onFinal((_text, m) => {
+        meta(m);
+      });
+
+      // 25 frames × 20 ms = 500 ms of audio before the first word decodes.
+      for (let i = 0; i < 25; i++) session.pushAudio(frame());
+      say(socket, [' four'], 0);
+      for (let i = 0; i < 10; i++) session.pushAudio(frame());
+      jest.advanceTimersByTime(1200);
+
+      expect(meta).toHaveBeenCalledWith({ startMs: 500, endMs: 700 });
+
+      void session.close();
+    });
+
+    /**
+     * Committing closes the item over whatever has been *decoded* so far, and
+     * this model runs seconds behind the audio — observed live on 2026-08-21,
+     * committing at each endpoint lost the back half of a sentence. The joined
+     * deltas already carry the full transcript, so there is nothing to gain.
+     */
+    it('does not commit the audio buffer, which would drop undecoded words', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      say(socket, [' four']);
+      jest.advanceTimersByTime(1200);
+
+      expect(socket.sent.join()).not.toContain('input_audio_buffer.commit');
+
+      void session.close();
+    });
+
+    /** The echo of our own commit, long after the turn already started. */
+    it('does not emit a second final when the committed transcript arrives', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      say(socket, [' a', ' table']);
+      jest.advanceTimersByTime(1200);
+
+      socket.receive({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'a table',
+      });
+
+      expect(finals).toEqual(['a table']);
+
+      void session.close();
+    });
+
+    it('emits nothing when the transcript is empty', () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      jest.advanceTimersByTime(5000);
+
+      expect(finals).toEqual([]);
+
+      void session.close();
+    });
+
+    /**
+     * The caller's last sentence is usually still inside the endpointing window
+     * when they hang up. Without this, the final utterance of every call is
+     * silently dropped.
+     */
+    it('flushes a pending utterance on close', async () => {
+      const { session, socket } = harness();
+      socket.open();
+
+      const finals: string[] = [];
+      session.onFinal((text) => finals.push(text));
+
+      say(socket, [' one', ' last', ' thing']);
+      expect(finals).toEqual([]);
+
+      await session.close();
+
+      expect(finals).toEqual(['one last thing']);
+    });
+  });
+
+  describe('events', () => {
     /**
      * The property that keeps a live call alive: an unrecognised or malformed
      * event is a log line, never an exception. A throw inside the socket's
@@ -518,9 +847,10 @@ describe('OpenAiSttSession', () => {
     });
 
     /**
-     * `audio_start_ms` is relative to the buffer of the session that emitted it,
-     * and a reconnect resets that buffer to zero. Without the epoch offset every
-     * timestamp after the first reconnect jumps backwards to near zero.
+     * The audio clock counts frames pushed over the whole call, so it does not
+     * reset when a socket does. That is what keeps `Utterance` offsets ordered
+     * across a mid-call reconnect — the model's own buffer clock restarts at
+     * zero and would jump every timestamp backwards.
      */
     it('keeps timestamps monotonic across a reconnect', () => {
       const { session, sockets } = harness();
@@ -537,21 +867,14 @@ describe('OpenAiSttSession', () => {
         meta(m);
       });
 
-      // The new session's own clock starts at zero again.
       sockets[1].receive({
-        type: 'input_audio_buffer.speech_started',
-        audio_start_ms: 40,
+        type: 'conversation.item.input_audio_transcription.delta',
+        delta: ' still here',
       });
-      sockets[1].receive({
-        type: 'input_audio_buffer.speech_stopped',
-        audio_end_ms: 600,
-      });
-      sockets[1].receive({
-        type: 'conversation.item.input_audio_transcription.completed',
-        transcript: 'still here',
-      });
+      jest.advanceTimersByTime(1200);
 
-      expect(meta).toHaveBeenCalledWith({ startMs: 2040, endMs: 2600 });
+      // 100 frames × 20 ms, and still counting up rather than restarting.
+      expect(meta).toHaveBeenCalledWith({ startMs: 2000, endMs: 2000 });
 
       void session.close();
     });

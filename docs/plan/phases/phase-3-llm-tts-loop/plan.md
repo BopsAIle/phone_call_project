@@ -2,9 +2,195 @@
 
 - **Parent plan:** [../../2026-08-19-ai-receptionist-phone-booking-agent.md](../../2026-08-19-ai-receptionist-phone-booking-agent.md)
 - **Branch:** `feat/llm-tts-loop`
-- **Status:** not started
+- **Status:** in progress
 - **Depends on:** [Phase 2](../phase-2-speech-to-text/plan.md)
 - **Unblocks:** [Phase 4](../phase-4-booking-slots/plan.md)
+
+## Decisions taken at the start of the phase
+
+| Decision | Choice |
+| --- | --- |
+| LLM client | The `openai` SDK. It owns SSE framing now and streaming tool-call delta accumulation in Phase 4, which is the genuinely error-prone part. Phase 2's argument for raw `ws` — that reconnection, batching, and backpressure had to be owned — does not transfer: these are one-shot HTTP requests. |
+| TTS client | Raw `fetch`. The response is a raw byte stream, not SSE, so the SDK would only sit between `response.body` and the frame chunker. |
+| Greeting | Pre-synthesised and cached as mu-law bytes, keyed on a hash of the text, voice, and model. Off the critical path for first impressions, and a cached greeting still plays when OpenAI is down — which Phase 6 relies on. |
+| Outbound audio | The gateway passes an `OutboundAudioSink` down at `create()`. `CallSession` never calls back into the gateway. |
+| Multiple finals per turn | Abort the in-flight completion and restart with the merged text, rather than debouncing. Zero added latency in the common single-final case. |
+| Barge-in signal | **Corrected mid-phase.** `onSpeechStarted` was believed to fire; it does not. See below — endpointing is now ours, and barge-in is gated on the first decoded word. |
+
+## Confirmed API shapes
+
+Verified against the live API on 2026-08-21, before any code was written — the same discipline that
+caught `gpt-live-transcribe` rejecting `turn_detection` in Phase 2. Do not substitute remembered
+values.
+
+**The brain streams from Chat Completions.** `gpt-5.6-terra` is present in `GET /v1/models`
+(alongside `gpt-5.6-luna` and `gpt-5.6-sol`) and `POST /v1/chat/completions` with `stream: true`
+returns the familiar chunk shape:
+
+```json
+{"object":"chat.completion.chunk","model":"gpt-5.6-terra",
+ "choices":[{"index":0,"delta":{"content":" what"},"finish_reason":null}]}
+```
+
+So text deltas are `choices[0].delta.content` and the Responses API is not required. The first chunk
+carries `delta.role` with empty content — skip it rather than feeding an empty string to the chunker.
+Chunks also carry an `obfuscation` field, which is padding against compression side-channels and is
+to be ignored.
+
+**TTS returns headerless PCM, streamed.** `POST /v1/audio/speech` with `response_format: "pcm"`
+responds `Content-Type: audio/pcm` and `Transfer-Encoding: chunked`. The body starts on sample data —
+a `RIFF` header would be `52 49 46 46`, and the first bytes are `0500 0500 0400 …` — so there is
+nothing to strip. `instructions` is accepted alongside `voice`.
+
+Measured for one sentence, *"Of course, I can take a booking request for two."*:
+
+| Stage | Size |
+| --- | --- |
+| PCM16 @ 24 kHz from OpenAI | 187,200 B (93,600 samples, 3.9 s) |
+| After `Downsampler` ÷3 | 31,200 samples @ 8 kHz |
+| After `encodeMulaw` | 31,200 B |
+| After `FrameBuffer` | **195 frames** of 160 B |
+
+Useful as a sanity check when the pipeline is wired: a frame count wildly off this ratio means the
+resampler phase or the framing is wrong, not the model.
+
+## The wrong STT model was chosen
+
+This phase started on the belief that `input_audio_buffer.speech_started` fires. It does not for
+`gpt-live-transcribe`, and neither does `speech_stopped` or `.completed`. Phase 2's plan flagged this
+as open and listed it as outcome 3; it was closed on recollection rather than evidence, and the first
+real call found it — the caller was transcribed perfectly and the agent never replied, because
+`onFinal` never fired.
+
+**The deeper mistake was narrower than it looked.** Phase 2 read
+`Turn detection is not supported for this transcription model` and concluded turn detection was
+unavailable. The message says *this model*. Probed on 2026-08-21, `gpt-4o-transcribe`,
+`gpt-4o-mini-transcribe`, `gpt-transcribe`, and `whisper-1` all accept `server_vad`; only
+`gpt-live-transcribe` and `gpt-realtime-whisper` reject it. `STT_MODEL` now defaults to
+`gpt-4o-transcribe` and the original design works as written.
+
+The transcript-activity gate below is kept as the fallback for a model without VAD, since `STT_MODEL`
+is configuration. The session adopts whichever the model actually provides — see "Adaptive
+endpointing".
+
+Read off a live session on 2026-08-21 by streaming a synthesised sentence plus four seconds of
+trailing silence. The **complete** event vocabulary:
+
+```
+  1 × session.created
+  1 × session.updated
+ 16 × conversation.item.input_audio_transcription.delta
+```
+
+That is all. `gpt-live-transcribe` is a continuous transcriber with no concept of a turn, which is
+also why it rejects `turn_detection`.
+
+### Adaptive endpointing
+
+The session does not trust its configuration about which signals it will get — it adopts whichever
+arrives. The first `speech_started` or `speech_stopped` sets `vadDriven`, permanently disarms the
+transcript gate (cancelling any timer it had already armed), and hands turns to the model. Without a
+boundary event the gate runs exactly as before.
+
+The two must never both fire: each would emit its own final for one utterance, and the conversation
+layer would answer twice.
+
+**Boundaries are tracked per `item_id`, not "most recent".** `.completed` for one utterance routinely
+arrives *after* `speech_started` for the next, so reading the latest boundary at completion time
+attributes one turn's timestamps to another — observed live, with two consecutive utterances both
+reporting `startMs: 2476`.
+
+**`silenceDurationMs` is the tuning knob, and 500 ms was too low.** It cut *"Hello, my name is Anna.
+Can I book a table for two people?"* into three separate turns, because the pauses at the commas
+cleared it — a caller gathering their thoughts mid-sentence would be cut off the same way. At 800 ms
+the same input returns as one clean utterance. The cost is explicit:
+
+| `silenceDurationMs` | Result | Caller falls silent → transcript |
+| --- | --- | --- |
+| 500 ms | split into three turns | +1360 ms |
+| **800 ms** | one clean turn | **+1849 ms** |
+| the gate, for comparison | one turn | +3700 ms |
+
+Both figures come from synthesised speech, which pauses more evenly than a person. This is the first
+thing to adjust on real calls: raise it if the agent talks over people, lower it if replies drag.
+
+### The fallback: a transcript-activity gate
+
+Exactly what Phase 2 prescribed for this outcome. A delta arriving into an empty buffer means the
+caller started talking; the transcript going quiet for `ENDPOINT_SILENCE_MS` means they stopped. The
+joined deltas are the transcript — verified lossless against a committed `.completed`, character for
+character.
+
+Two things were tried and rejected, both on measurements:
+
+**`input_audio_buffer.commit` — rejected.** It is the documented way to delimit an utterance with VAD
+off, and it does return a clean `.completed`. But it closes the item over whatever has been *decoded*
+so far, and this model runs seconds behind the audio. Committing at each endpoint lost the back half
+of a sentence outright on a live run: `"Hello, my name is Anna. Can I book a table for two people?"`
+came back as `"Hello,"` and `"my name is"`, with the rest discarded. Without it, the same input
+returns as one complete final. The commit also costs ~600 ms before `.completed` arrives, so it was
+never on the critical path anyway.
+
+**A 900 ms threshold — too tight.** Mid-speech delta gaps are roughly twice as wide over 8 kHz mu-law
+as over direct 24 kHz PCM (~1200 ms against 660 ms): worse audio decodes in chunkier bursts. 900 ms
+split one sentence into three finals. Now 1200 ms.
+
+### Barge-in is narrower than planned
+
+`handleSpeechStarted` acts only while `SPEAKING`, not while `THINKING`. The signal is a
+transcript-activity gate rather than a VAD edge, so during `THINKING` it nearly always means the
+caller's own sentence continuing past a pause the endpointer called early — and no audio is playing
+to interrupt. Cancelling there would discard a turn the merge in `handleFinal` completes correctly.
+
+The honest cost: barge-in now waits for the first *decoded word* rather than the first energy, so it
+is roughly 700 ms later than a true VAD edge would be. The ~200 ms interruption target in the demo
+criterion is not achievable on this signal.
+
+## Measured latency — the budget is not met
+
+Measured end to end against the live API on 2026-08-21, one turn, no telephony:
+
+| Stage | Budget | Before the model switch | After |
+| --- | --- | --- | --- |
+| Caller stops → transcript | 500 ms | ~3700 ms | **~1850 ms** |
+| LLM first token | 400 ms | ~900 ms | ~900 ms |
+| TTS first audio | 300 ms | ~850 ms | ~850 ms |
+| **Caller stops → first frame** | **1500 ms** | ~5500 ms | **~3600 ms** |
+
+The model switch removed roughly 1.9 s. The target is still missed by about 2 s, and STT remains the
+largest single term at ~1850 ms even with server VAD — of which 800 ms is the deliberate
+`silenceDurationMs` choice above and the rest is decode time.
+
+Our own code — chunker, resampler, framing — contributes nothing measurable in either column.
+
+Recorded plainly rather than restated softly, because the parent plan makes < 1.5 s a project goal
+and this is not yet there.
+
+What was ruled out: `gpt-5.6-terra` is a reasoning model, and a first sample suggested
+`reasoning_effort: "none"` cut first token threefold. **It does not.** Across three samples per
+configuration, `terra` default, `terra` with `reasoning_effort: "none"`, and `gpt-5.6-luna` are
+indistinguishable inside the noise. The parameter is deliberately *not* set: it would be cargo cult
+based on one outlier.
+
+Levers still untried, in order of expected value:
+
+1. **Tune `silenceDurationMs` against real calls.** 800 ms of the ~1850 ms is this constant, chosen
+   on synthesised speech that pauses more evenly than a person. Real callers may tolerate 600 ms,
+   which would be an immediate 200 ms with no other change.
+2. **Shorten the system prompt.** It is re-read every turn and sits in front of first token.
+3. **A shorter first sentence.** Prompting for a brief opener means the chunker flushes sooner; time
+   to *first audio* matters far more than time to the whole reply.
+4. **`gpt-5.6-luna`.** Indistinguishable from `terra` in testing, but worth re-measuring under load —
+   `LLM_MODEL` makes it a config change.
+5. **The `gpt-realtime-2.1` speech-to-speech adapter** the parent plan holds in reserve behind the
+   provider interfaces. Evaluated and deferred on 2026-08-21: it would remove the cascade entirely
+   and get closest to the target, but Phase 4 requires the readback to be *generated from stored
+   values rather than paraphrased by the model*, which an S2S model cannot guarantee. That is a
+   safety property for a booking system, not a preference. Revisit if the levers above stall.
+
+**A hand-rolled energy VAD is no longer on this list.** It was the leading candidate while the model
+was believed to report no boundaries; with `server_vad` doing the job properly, writing our own would
+be re-solving a solved problem — exactly what Phase 2 argued against twice.
 
 ## Objective
 
@@ -42,6 +228,49 @@ GREETING ──► LISTENING ──► THINKING ──► SPEAKING ──► LIS
 Every transition is triggered by an STT event or a stream completing. Keeping this explicit is what
 stops the classic voice-agent failure where two replies play over each other because a late tool
 result arrived after the caller already moved on.
+
+### The outbound sink
+
+`MediaStreamGateway` builds a sink closing over the socket and `streamSid`, and hands it to
+`ConversationService.create()`. `CallSession` writes through it and never calls back into the
+gateway — routing barge-in through `findByStreamSid` would make a cycle (gateway →
+`ConversationService` → `CallSession` → gateway) and leak the gateway's private session type into the
+conversation layer.
+
+```ts
+export interface OutboundAudioSink {
+  playFrame(mulawFrame: Buffer): void;
+  mark(name: string): void;
+  clear(): void;
+}
+```
+
+`findByStreamSid` stays, but its only caller is the dev controller; its comment claiming a Phase 3
+purpose is corrected.
+
+### One caller turn can produce several finals
+
+`gpt-live-transcribe` chunks audio itself, so two spoken sentences may arrive as two `.completed`
+events. Without a rule that is two replies talking over each other.
+
+- Final in `LISTENING` → commit immediately, go `THINKING`. The common case, no cost.
+- Final in `THINKING` → abort the in-flight completion, merge into the same user message, restart.
+  No audio has played yet, so this costs one wasted partial completion and nothing else.
+- Final in `SPEAKING` → mostly unreachable, because `speech_started` fires first and barge-in has
+  already moved the session to `LISTENING`. Handle it as a fresh turn rather than asserting.
+
+Deliberately **not** a debounce window: a window would add its full duration to *every* turn against
+a 1.5 s budget, to fix a case that is the exception.
+
+### `toolCalls` must always settle
+
+`LlmProvider.respond` returns `{ sentences, toolCalls: Promise<ToolCall[]> }`. On barge-in the
+consumer abandons `sentences` mid-iteration, which calls `.return()` on the generator and unwinds its
+`finally`. Settle `toolCalls` there — resolving `[]` rather than rejecting.
+
+A rejection nobody is awaiting becomes an unhandled rejection that ends the process and every other
+live call with it, which is the failure `MediaStreamGateway` already guards against around frame
+handling. Phase 4 is the phase that actually awaits this promise, and it must not be able to hang.
 
 ### Sentence chunking — the latency trick that matters most
 
