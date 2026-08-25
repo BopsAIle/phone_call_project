@@ -1,20 +1,38 @@
 # AI Bridge — Integration Contract
 
-**Status:** draft, pending agreement
-**Owners:** backend team (this repo) · AI team
+**Status:** draft, pending your agreement
+**Owners:** telephony backend team · AI team
 **Last updated:** 2026-08-25
 
-This document defines the wire protocol between the AI Receptionist telephony
-backend and the AI team's voice service. Both sides implement against this
-document. If the implementation and this document disagree, **this document is
-what gets corrected** — the AI team builds against it and cannot see this repo.
+## What this is
 
-Items marked **[CONFIRM]** are proposals that need the AI team's agreement
-before either side builds.
+We run an AI receptionist for restaurants. A customer dials the restaurant's
+phone number, and our backend answers it over Twilio.
 
-> **Building the AI side? Start at [§11](#11-getting-to-a-first-test).** It breaks
-> the work into three milestones, the first of which needs no STT or LLM and is
-> testable on a real phone call.
+You are taking over the voice pipeline: speech-to-text, the language model,
+text-to-speech, turn-taking, and the greeting. We keep the telephony — the phone
+network, the codecs, and the audio framing.
+
+This document is the contract between the two halves. It defines the transport,
+the message shapes, the audio format, and the guarantees each side owes the
+other. Both sides implement against it, and **if the code and this document ever
+disagree, the document is what gets corrected** — you are building against it
+and cannot see our codebase.
+
+**We need three things back from you**, listed in full in
+[§10](#10-open-questions):
+
+1. The WebSocket URL and auth scheme
+2. Confirmation of the frame encoding — binary audio, text control ([§2](#2-transport))
+3. Answers on resume semantics, batch size, and transcripts
+
+Items marked **[CONFIRM]** are proposals, not decisions. Push back on any of
+them; they are written down so there is something concrete to disagree with.
+
+> **Ready to build? Start at [§11](#11-getting-to-a-first-test).** It breaks the
+> work into three milestones. The first needs no STT and no LLM, and is testable
+> on a real phone call — you can be answering calls before your pipeline is
+> finished.
 
 ---
 
@@ -23,8 +41,8 @@ before either side builds.
 ```mermaid
 flowchart LR
     Caller["Caller<br/>(PSTN)"] <--> Twilio
-    Twilio <-->|"8 kHz mu-law<br/>20 ms frames"| Backend["Telephony backend<br/>(this repo)"]
-    Backend <-->|"16 kHz PCM16<br/>WebSocket"| AI["AI service<br/>(AI team)"]
+    Twilio <-->|"8 kHz mu-law<br/>20 ms frames"| Backend["Telephony backend<br/>(us)"]
+    Backend <-->|"16 kHz PCM16<br/>WebSocket"| AI["AI service<br/>(you)"]
 ```
 
 ### The AI team owns
@@ -307,9 +325,9 @@ model. That same VAD firing *while a reply is playing* **is** barge-in. It is th
 identical signal, already inside your process. Emitting it is a `send()`, not a
 feature.
 
-**The backend cannot compute it.** The VAD left this repo with the STT module.
-All the backend holds is raw audio bytes. A cough, a door closing, a television,
-and "wait, actually—" are indistinguishable without a VAD.
+**The backend cannot compute it.** The VAD moves to your service along with the
+rest of speech-to-text. All the backend holds is raw audio bytes. A cough, a door
+closing, a television, and "wait, actually—" are indistinguishable without a VAD.
 
 **The backend must not rebuild one.** Two VADs means two sources of truth for
 "is the caller talking", and they *will* disagree — the backend flushing on a
@@ -404,8 +422,8 @@ it arrives after the conversation has moved on.
 | 3 | Is conversation state resumable after a socket drop, keyed on `callId`? (§2) | AI team | Open |
 | 4 | Is a ~100 ms input batch acceptable, given it sits in front of your VAD? (§5) | AI team | Open |
 | 5 | Any additional control messages needed? (§4) | Both | Open |
-| 6 | **Transcripts.** Current contract is audio-only, so the backend persists no conversation text. The `Utterance` table exists and is correct but will sit empty. If transcripts are wanted for review, analytics, or booking extraction, say so — adding a `transcript` control message is cheap now and awkward later. | Both | Open |
-| 7 | **Bookings.** The current system was heading toward tool-calling to capture reservation details. Who owns that now, and how does a booking reach our database? Not covered by this contract. | Both | Open |
+| 6 | **Transcripts.** This contract is audio-only, so nothing records what was said. Our database already has the table for it, sitting empty. If transcripts are wanted for call review, analytics, or extracting booking details, say so — adding a `transcript` control message is cheap now and awkward later. | Both | Open |
+| 7 | **Bookings.** The system was heading toward tool-calling to capture reservation details (name, party size, time). Who owns that now, and how does a completed booking reach our database? Not covered by this contract and it needs to be. | Both | Open |
 
 ---
 
@@ -476,10 +494,45 @@ frame.
   you — and we can run against a stub of yours. Neither team needs to block on
   the other to make progress.
 
-## Related
+---
 
-- [Phase 1 — Audio path](../features/phase-1-audio-path.md) — the mu-law codec,
-  resampler, and Twilio Media Streams gateway that remain on the backend side.
-- [Phase 3 — The agent speaks](../features/phase-3-llm-tts-loop.md) — the
-  pipeline this integration replaces, including the sentence-chunking and
-  barge-in behaviour described in §8.
+## 12. What we need back from you
+
+In rough priority order. The first two unblock everything else.
+
+| | What | Why it blocks |
+|---|---|---|
+| 1 | **A `wss://` URL and a token**, even pointing at a stub that only accepts the connection | Without it we cannot test our half at all |
+| 2 | **Confirm binary audio / text control** ([§2](#2-transport)) | The only open item that changes code on both sides |
+| 3 | Answers to the rest of [§10](#10-open-questions) | Shapes the protocol, cheap to settle now |
+| 4 | A view on the [§11](#11-getting-to-a-first-test) milestones — is that order workable for you? | Determines what we can test and when |
+
+### On our side, ready now
+
+- The telephony path is built and tested: Twilio webhook, media socket, mu-law
+  codec, 8 ↔ 16 kHz resampling, 20 ms framing, and the `clear` that implements
+  barge-in.
+- The client that speaks this contract is written, with unit tests covering the
+  handshake, batching, reconnection, and the `interrupt` path.
+- We can point it at any endpoint that accepts a WebSocket. **Milestone 1 becomes
+  testable the moment we have a URL** — even one that ignores our audio and plays
+  a fixed greeting.
+
+### Two things worth flagging before you start
+
+- **Latency is the whole product.** [§8](#8-latency-budget--what-we-measured) is
+  the budget we measured on the implementation you are replacing, including which
+  knob dominated (the VAD silence window) and the single biggest win we found
+  (chunking into TTS at sentence boundaries, worth ~1.7 s). Please read it before
+  tuning anything — it will save you rediscovering the same numbers.
+
+- **The `interrupt` event is the one requirement with no workaround.**
+  [§7](#7-why-the-interrupt-event-is-yours) explains why it cannot live on our
+  side. If it is genuinely not possible for you, tell us early — there is a
+  fallback, but it costs audio quality and we would rather not.
+
+### Reply to this document
+
+Please respond with the answers inline, or as edits, rather than in chat — this
+file is the reference both sides build from, and anything agreed elsewhere gets
+lost. We will keep it updated as items are settled.
