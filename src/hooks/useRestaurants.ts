@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { restaurantApi } from '../api'
-import { Restaurant, RestaurantStatus } from '../types'
+import { RestaurantStatus } from '../types'
 
 export const useRestaurants = (status?: RestaurantStatus) => {
   return useQuery({

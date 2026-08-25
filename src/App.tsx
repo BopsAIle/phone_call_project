@@ -1,7 +1,7 @@
 import React from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query'
-import { ConfigProvider, theme as antTheme } from 'antd'
+import { ConfigProvider } from 'antd'
 import viVN from 'antd/locale/vi_VN'
 import { MainLayout } from './components'
 import { Dashboard, RestaurantsPage, BranchesPage, BookingsPage } from './pages'

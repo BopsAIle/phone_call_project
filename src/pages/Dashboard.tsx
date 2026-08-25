@@ -1,5 +1,5 @@
 import React from 'react'
-import { Row, Col, Card, Statistic, Table, Tag, Empty, Divider } from 'antd'
+import { Row, Col, Card, Statistic, Table, Tag, Empty } from 'antd'
 import {
   ShopOutlined,
   CalendarOutlined,
@@ -7,12 +7,10 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   CloseCircleOutlined,
-  ArrowRightOutlined,
 } from '@ant-design/icons'
 import { useBookingStats, useRestaurants, useBranches, useBookings } from '../hooks'
 import { LoadingSpinner } from '../components'
-import { BOOKING_STATUS_LABELS, BOOKING_SOURCE_LABELS } from '../utils/constants'
-import { BookingStatus } from '../types'
+import { BOOKING_STATUS_LABELS } from '../utils/constants'
 
 export const Dashboard: React.FC = () => {
   const { data: stats, isLoading: statsLoading } = useBookingStats()

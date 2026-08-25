@@ -1,9 +1,9 @@
 import React from 'react'
-import { Card, Button, Table, Tag, Descriptions, Empty, Space, Spin } from 'antd'
+import { Card, Button, Table, Tag, Descriptions, Empty, Spin } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
 import { useBranchesByRestaurant } from '../../hooks'
 import { BRANCH_STATUS_LABELS } from '../../utils/constants'
-import { Restaurant, Branch } from '../../types'
+import { Restaurant } from '../../types'
 
 interface RestaurantDetailProps {
   restaurant: Restaurant
