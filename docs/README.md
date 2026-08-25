@@ -32,11 +32,14 @@ workflow, or run `/feature-doc <feature-name>` to scaffold them.
 
 <!-- Add one line per integration: - [Service name](integrations/<slug>.md) — one-line summary -->
 
-- [AI Bridge](integrations/ai-bridge-contract.md) — wire protocol between this backend and
-  the AI team's voice service, which takes over STT, LLM, TTS, turn-taking, and the
-  greeting. Covers the WebSocket transport, the 16 kHz PCM16 audio format, the
+- [AI Bridge — contract](integrations/ai-bridge-contract.md) — wire protocol between this
+  backend and the AI team's voice service, which takes over STT, LLM, TTS, turn-taking,
+  and the greeting. Covers the WebSocket transport, the 16 kHz PCM16 audio format, the
   `interrupt` barge-in event, and the latency budget measured on the pipeline it
   replaces. **Draft — pending agreement.**
+- [AI Bridge — plan](integrations/ai-bridge-plan.md) — how this repo becomes a telephony
+  media bridge: what is deleted, what survives, the commit sequence, and the latency
+  investigation that ruled out the resampler and a carrier switch. **Approved.**
 
 ## Plans
 
