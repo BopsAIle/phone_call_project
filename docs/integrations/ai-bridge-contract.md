@@ -12,6 +12,10 @@ what gets corrected** — the AI team builds against it and cannot see this repo
 Items marked **[CONFIRM]** are proposals that need the AI team's agreement
 before either side builds.
 
+> **Building the AI side? Start at [§11](#11-getting-to-a-first-test).** It breaks
+> the work into three milestones, the first of which needs no STT or LLM and is
+> testable on a real phone call.
+
 ---
 
 ## 1. Scope — who owns what
@@ -404,6 +408,73 @@ it arrives after the conversation has moved on.
 | 7 | **Bookings.** The current system was heading toward tool-calling to capture reservation details. Who owns that now, and how does a booking reach our database? Not covered by this contract. | Both | Open |
 
 ---
+
+## 11. Getting to a first test
+
+Three milestones, each independently testable on a real phone call. Deliver them
+in order and we can verify each as it lands, rather than debugging the whole
+integration at once.
+
+**Before any of them:** confirm the frame encoding in [§2](#2-transport). Every
+milestone below assumes binary frames for audio and text frames for control. It
+is the one open item that changes code on both sides.
+
+### Milestone 1 — the greeting plays
+
+**You build**
+
+- Accept a `wss://` connection carrying `Authorization: Bearer <token>`
+- Read the `session.init` text frame
+- Speak `greeting` back as 16 kHz PCM16 mono LE **binary** frames
+
+**We need from you:** the URL and a token. Nothing else.
+
+**What it proves:** transport, auth, the handshake, store context, your TTS, and
+our entire downsample → mu-law → 20 ms reframe → Twilio playback path. That is
+most of the integration surface, and it needs **no STT and no LLM** — which is
+why it is worth doing first rather than waiting for a complete service.
+
+**Test:** call the number and hear the greeting.
+
+### Milestone 2 — one full turn
+
+**You build**
+
+- Accept binary audio frames and run STT on them
+- Run the model, synthesise, send reply audio back
+- Honour `resumed: true` by *not* re-greeting
+
+**What it proves:** the conversation works end to end, and reconnection does not
+restart the call.
+
+**Test:** call, ask a question, get a spoken answer. Then we drop the socket
+mid-call and confirm you pick up without greeting again.
+
+### Milestone 3 — barge-in
+
+**You build**
+
+- Emit `{"event":"interrupt"}` when your VAD fires during playback
+- Send it **after** the last audio frame of the aborted response ([§6.3](#63-send-interrupt-after-the-last-audio-frame-of-the-aborted-response))
+- Abort in-flight generation and send nothing further for that turn
+
+**What it proves:** the hardest part, and the one that cannot be verified except
+on a live call.
+
+**Test:** talk over the agent mid-reply. It must stop within roughly one 20 ms
+frame.
+
+### What we can give you
+
+- **A recording of real caller audio in exactly the form we send it** — 16 kHz
+  PCM16, upsampled from a genuine 8 kHz PSTN call. Worth tuning your VAD and
+  endpointing against this rather than studio-quality 16 kHz: telephony audio
+  decodes in chunkier bursts, and thresholds tuned on clean input behave
+  differently on a real line. See [§5](#5-audio-format) and
+  [§8](#8-latency-budget--what-we-measured).
+- **A stub of our side**, if it helps you develop before we are ready to call
+  you — and we can run against a stub of yours. Neither team needs to block on
+  the other to make progress.
 
 ## Related
 
