@@ -82,10 +82,16 @@ not parsing.
   1000 ms**, then gives up and lets the call continue without the agent.
 - Caller audio arriving while the socket is down is buffered, capped at
   **~2 seconds**, oldest dropped first. See [§9](#9-failure-modes).
-- A reconnect starts a **new session**. Resend `session.init`. The AI team
-  should treat conversation state as lost unless `callId` is used to resume it.
-  **[CONFIRM]** whether resume is supported, or whether a dropped socket ends
-  the conversation.
+- A reconnect resends `session.init`, because the AI service has no other way to
+  recover the store context — but with **`resumed: true`**.
+
+  **`resumed` gates the greeting.** On the first connect it is `false` and you
+  speak the greeting. On a reconnect it is `true` and you must **not** — a
+  caller mid-conversation would not understand being greeted a second time.
+
+- Beyond the greeting, the AI team should treat conversation state as lost
+  unless `callId` is used to resume it. **[CONFIRM]** whether resume is
+  supported, or whether a dropped socket ends the conversation.
 
 ---
 
@@ -143,7 +149,8 @@ Sent once, immediately after the socket opens.
   "storeName": "Bella Vista",
   "timezone": "Europe/Berlin",
   "locale": "en",
-  "greeting": "Thanks for calling Bella Vista. This is an automated assistant — how can I help you today?"
+  "greeting": "Thanks for calling Bella Vista. This is an automated assistant — how can I help you today?",
+  "resumed": false
 }
 ```
 
@@ -154,6 +161,7 @@ Sent once, immediately after the socket opens.
 | `timezone` | string | IANA zone, e.g. `Europe/Berlin`. Needed so "tonight" and "tomorrow" resolve against the store's clock, not the server's. |
 | `locale` | `"en"` \| `"de"` | Language for this call. |
 | `greeting` | string | Exact text to speak first. Configured per store; do not paraphrase — it carries a legally required automated-assistant disclosure. |
+| `resumed` | boolean | `false` on the first connect — **speak the greeting**. `true` after a reconnect — **do not**. Every other field is resent unchanged either way. |
 
 #### Audio (binary frame)
 
@@ -260,7 +268,7 @@ frames arrive after the backend has flushed, and get played as the start of the
 "new" reply. This produces a call that sounds subtly broken in a way that is
 very hard to trace from either side's logs.
 
-### 6.4 Speak the greeting on `session.init`
+### 6.4 Speak the greeting on `session.init` — unless `resumed` is true
 
 Use the supplied `greeting` text and `locale`. Speak it verbatim.
 
@@ -268,6 +276,10 @@ Use the supplied `greeting` text and `locale`. Speak it verbatim.
 within a few seconds. The greeting text also carries a required
 automated-assistant disclosure, so paraphrasing it is a compliance problem, not
 a style choice.
+
+*And if you ignore `resumed`:* every mid-call socket drop re-greets the caller
+in the middle of their conversation. The field exists precisely because the
+context has to be resent on reconnect while the greeting must not be repeated.
 
 ### 6.5 Emit audio continuously enough not to starve playback
 
