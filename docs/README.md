@@ -7,6 +7,9 @@
 - [features/](features/) — change documents written **after** implementation, named
   `<feature-slug>.md`. Each explains why the change was needed, what changed, how it
   works, and its impact.
+- [integrations/](integrations/) — contracts with external services and teams. These
+  are shared with the other side and are the source of truth for the wire protocol,
+  so they are corrected before the code is.
 
 Both are required for every new feature. See
 [.claude/skills/feature-docs/SKILL.md](../.claude/skills/feature-docs/SKILL.md) for the
@@ -24,6 +27,16 @@ workflow, or run `/feature-doc <feature-name>` to scaffold them.
 - [Phase 3 — The agent speaks](features/phase-3-llm-tts-loop.md) — the LLM and TTS loop, sentence
   chunking, the turn state machine, barge-in, and the greeting with its automated-assistant
   disclosure. Phase 2's change doc was deliberately skipped; its plan is the record.
+
+## Integrations
+
+<!-- Add one line per integration: - [Service name](integrations/<slug>.md) — one-line summary -->
+
+- [AI Bridge](integrations/ai-bridge-contract.md) — wire protocol between this backend and
+  the AI team's voice service, which takes over STT, LLM, TTS, turn-taking, and the
+  greeting. Covers the WebSocket transport, the 16 kHz PCM16 audio format, the
+  `interrupt` barge-in event, and the latency budget measured on the pipeline it
+  replaces. **Draft — pending agreement.**
 
 ## Plans
 
