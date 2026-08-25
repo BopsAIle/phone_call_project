@@ -29,8 +29,8 @@ export const BranchForm: React.FC<BranchFormProps> = ({
         name: initialData.name,
         phone: initialData.phone,
         address: initialData.address,
-        opening_time: initialData.opening_time ? dayjs(initialData.opening_time, 'HH:mm:ss') : null,
-        closing_time: initialData.closing_time ? dayjs(initialData.closing_time, 'HH:mm:ss') : null,
+        opening_time: initialData.opening_time ? dayjs(initialData.opening_time, 'HH:mm') : null,
+        closing_time: initialData.closing_time ? dayjs(initialData.closing_time, 'HH:mm') : null,
         status: initialData.status,
       })
     } else {
@@ -42,8 +42,8 @@ export const BranchForm: React.FC<BranchFormProps> = ({
     try {
       const data = {
         ...values,
-        opening_time: values.opening_time?.format('HH:mm:ss'),
-        closing_time: values.closing_time?.format('HH:mm:ss'),
+        opening_time: values.opening_time?.format('HH:mm'),
+        closing_time: values.closing_time?.format('HH:mm'),
       }
 
       if (isEditing && initialData) {
@@ -135,7 +135,7 @@ export const BranchForm: React.FC<BranchFormProps> = ({
           name="opening_time"
           rules={[{ required: true, message: 'Vui lòng chọn giờ mở cửa' }]}
         >
-          <TimePicker format="HH:mm:ss" placeholder="Chọn giờ mở cửa" />
+          <TimePicker format="HH:mm" placeholder="Chọn giờ mở cửa" />
         </Form.Item>
 
         <Form.Item
@@ -143,7 +143,7 @@ export const BranchForm: React.FC<BranchFormProps> = ({
           name="closing_time"
           rules={[{ required: true, message: 'Vui lòng chọn giờ đóng cửa' }]}
         >
-          <TimePicker format="HH:mm:ss" placeholder="Chọn giờ đóng cửa" />
+          <TimePicker format="HH:mm" placeholder="Chọn giờ đóng cửa" />
         </Form.Item>
 
         {isEditing && (
