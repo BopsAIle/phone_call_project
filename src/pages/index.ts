@@ -1,0 +1,5 @@
+export { Dashboard } from './Dashboard'
+export { RestaurantList } from './Restaurants/RestaurantList'
+export { RestaurantsPage } from './Restaurants'
+export { BranchesPage } from './Branches'
+export { BookingsPage } from './Bookings'
