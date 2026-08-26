@@ -1,98 +1,237 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# AI Receptionist — telephony backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A phone receptionist for restaurants. A customer dials the restaurant's number,
+Twilio answers it and streams the audio here, and this service bridges that audio
+to the AI team's voice service, which does the talking.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+**This repo owns telephony**: the Twilio webhook, the media-stream socket, codec
+conversion, 20 ms framing, and Twilio's playback buffer. **The AI team owns the
+conversation**: speech-to-text, voice activity detection, the language model,
+text-to-speech, turn-taking, and the greeting.
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ npm install
+```mermaid
+flowchart LR
+    Caller["PSTN caller"] <--> Twilio
+    Twilio <-->|"8 kHz mu-law, 20 ms frames"| BE["This backend"]
+    BE <-->|"16 kHz PCM16, WebSocket"| AI["AI service"]
 ```
 
-## Compile and run the project
+The wire protocol between the two halves is
+[docs/integrations/ai-bridge-contract.md](docs/integrations/ai-bridge-contract.md).
+
+---
+
+## Getting started
+
+You do **not** need a phone, a Twilio account, or a public tunnel to run this.
+A browser dev client speaks Twilio's protocol using your microphone.
+
+### Prerequisites
+
+- Node.js 20+
+- Docker (for Postgres)
+- The AI team's service, running locally or reachable over the network
+
+### 1. Install
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install
 ```
 
-## Run tests
+### 2. Start Postgres
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run db:up
 ```
 
-## Deployment
+> **Note the port: 5433, not 5432.** The compose file publishes the container's
+> 5432 on host port **5433**, because a locally-installed PostgreSQL usually
+> already owns 5432 — on Windows both can bind it and connections silently reach
+> the wrong server. If migrations behave strangely, check which one you are
+> actually talking to.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+### 3. Configure `.env`
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Copy the template and fill it in:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+cp .env.example .env
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+A minimal configuration that works for local browser testing:
 
-## Resources
+```ini
+NODE_ENV=development
+PORT=3000
 
-Check out a few resources that may come in handy when working with NestJS:
+DATABASE_URL=postgresql://receptionist:receptionist@localhost:5433/ai_receptionist?schema=public
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+# The AI team's service. Locally this is plain ws:// — their process serves
+# plain WebSocket and TLS is terminated at ingress in production.
+AI_BRIDGE_URL=ws://localhost:8000/v1/bridge
+AI_BRIDGE_TOKEN=<whatever their local config expects>
 
-## Support
+# Identifies the restaurant. Must be E.164. For browser testing it does not
+# have to be a real Twilio number — it only has to match the seeded store.
+TWILIO_PHONE_NUMBER=+15551234567
+TWILIO_ACCOUNT_SID=AC00000000000000000000000000000000
+TWILIO_AUTH_TOKEN=placeholder
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+# Only used to build the wss:// URL Twilio would dial. The browser client keeps
+# its own origin and takes just the path, so a placeholder is fine locally.
+PUBLIC_BASE_URL=https://example.invalid
 
-## Stay in touch
+# Seed values. After `db:seed` the Store row is the source of truth.
+STORE_NAME=Bella Vista
+STORE_TIMEZONE=Europe/Berlin
+DEFAULT_LOCALE=en
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+# Still validated at boot but unused on the bridge path — see Known warts.
+OPENAI_API_KEY=placeholder
+```
 
-## License
+Every key is validated at boot by [env.schema.ts](src/config/env.schema.ts).
+A missing or malformed value crashes the process on startup rather than failing
+in the middle of a call.
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+### 4. Migrate and seed
+
+```bash
+npm run db:migrate
+npm run db:seed
+```
+
+Seeding creates a `Store` keyed on `TWILIO_PHONE_NUMBER`, with placeholder
+greetings in English and German. **Without it every call is rejected** — the
+voice webhook resolves the store by the number that was dialled.
+
+The greeting text carries a legally required automated-assistant and
+transcription disclosure. Edit the wording directly in the database; a re-seed
+deliberately leaves it alone.
+
+### 5. Start the AI team's service
+
+Follow their repo's own instructions. Two things to check:
+
+- **It must not use port 3000**, which this backend takes by default.
+- `curl http://localhost:<their-port>/health` should return `{"status":"ok"}`.
+  Note that their health check does not touch speech services, so a healthy
+  response means their process is up, not that it can transcribe.
+
+Then set `AI_BRIDGE_URL` to `ws://localhost:<their-port>/v1/bridge`.
+
+### 6. Build the browser client and start
+
+```bash
+npm run build:client
+npm run start:dev
+```
+
+The dev client is a separate esbuild bundle, so `build:client` is needed after a
+fresh clone and whenever `client/` changes. Use `npm run build:client:watch`
+while working on it.
+
+### 7. Make a call
+
+Open **<http://localhost:3000/dev>** and start a call. Grant microphone access.
+
+The page is registered only when `NODE_ENV !== 'production'`.
+
+---
+
+## What a working call looks like
+
+```
+[TwilioController]      Call <id> from +15550000001 to store Bella Vista
+[AiBridgeSession[<id>]] AI bridge connected as Bella Vista (en)
+[ConversationService]   Conversation open for call <id>
+[AiBridgeSession[<id>]] First agent audio: 6400 bytes from the AI service
+```
+
+Those middle two lines are the ones that matter:
+
+- **`AI bridge connected`** — the socket is up, authentication passed, and
+  `session.init` went over. It names the store and locale so you can see the
+  session context arrived intact.
+- **`First agent audio`** — they are actually speaking. This separates
+  *connected but silent* (their side) from *connected and speaking but you hear
+  nothing* (our conversion or the Twilio path).
+
+You should then hear the greeting in the browser. Talking over the agent should
+stop it within about one frame.
+
+---
+
+## Troubleshooting
+
+| What you see | What it means |
+|---|---|
+| `AI bridge rejected our credentials (1008)` | Wrong `AI_BRIDGE_TOKEN`. Deliberately not retried — the next attempt would present the same token. |
+| `AI bridge socket error: …` then `reconnecting in 200ms` | Wrong URL, unreachable host, or a TLS mismatch. Three attempts, then the call continues without an agent. |
+| `Could not open a conversation for call …` | `AI_BRIDGE_URL` is empty. The call connects but is silent. |
+| `AI bridge connected` but never `First agent audio` | Their side is not sending the greeting. Their problem, not ours. |
+| `Malformed message: …` | They are sending something we cannot parse — contract drift. |
+| `No <Stream> in the TwiML — is +… seeded as a store?` | Run `npm run db:seed`, or `TWILIO_PHONE_NUMBER` does not match the seeded row. |
+| `Cannot reach the database. Is it running?` | `npm run db:up`, and check you are on port **5433**. |
+| Browser asks for a microphone and nothing happens | `npm run build:client` — the bundle is not built on install. |
+
+---
+
+## Commands
+
+| | |
+|---|---|
+| `npm run start:dev` | Watch-mode server |
+| `npm run build:client` | Build the browser dev client bundle |
+| `npm test` | Unit tests |
+| `npm run test:e2e` | End-to-end tests (needs a migrated database) |
+| `npm run lint` | ESLint with `--fix` |
+| `npm run build` | Production build |
+| `npm run db:up` / `db:down` | Postgres container |
+| `npm run db:migrate` / `db:seed` / `db:reset` | Schema and fixtures |
+| `npm run db:studio` | Prisma Studio |
+| `npm run replay -- in.wav out.wav` | Drive a call from a WAV file, no microphone |
+
+### Replaying a fixture
+
+```bash
+npm run replay -- test/fixtures/tone-sweep.wav out.wav --interrupt 4000
+```
+
+Needs the server already running. Frames are paced at 20 ms like real Twilio;
+`--fast` skips the pacing when only the audio path is in question. `--interrupt`
+fires a barge-in that far into the call, and the frame count at the end shows how
+quickly playback stopped.
+
+> The transcript it prints reads `Utterance` rows, which are no longer written —
+> the AI service returns no transcripts. Audio and frame counts still work.
+
+---
+
+## Known warts
+
+These are tracked and deliberate, not oversights.
+
+- **`OPENAI_API_KEY` is still required at boot** but unused on the bridge path.
+  It goes away with `src/stt/`, `src/llm/`, and `src/tts/`, which are still on
+  disk but no longer wired into the module graph.
+- **A mid-call reconnect re-greets the caller** and loses conversation history.
+  The handshake carries a `resumed` flag for exactly this, but the AI service
+  does not honour it yet. Raised with them as a v2 item.
+- **Nothing captures a booking.** The AI service does no tool calls and no
+  database access, and the tool-calling work that was planned here is being
+  removed. Ownership is an open question in
+  [the contract](docs/integrations/ai-bridge-contract.md).
+
+---
+
+## Documentation
+
+- [docs/README.md](docs/README.md) — index
+- [docs/integrations/ai-bridge-contract.md](docs/integrations/ai-bridge-contract.md)
+  — the wire protocol between this backend and the AI service
+- [docs/integrations/ai-bridge-plan.md](docs/integrations/ai-bridge-plan.md) —
+  how this repo became a media bridge, and why
+- [docs/features/](docs/features/) — what each change did and why it was needed
+- [CLAUDE.md](CLAUDE.md) — conventions, and the documentation workflow every
+  feature must follow

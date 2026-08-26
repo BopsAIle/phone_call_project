@@ -1,7 +1,5 @@
 import { Module } from '@nestjs/common';
-import { LlmModule } from '../llm/llm.module';
-import { SttModule } from '../stt/stt.module';
-import { TtsModule } from '../tts/tts.module';
+import { AiBridgeModule } from '../ai-bridge/ai-bridge.module';
 import { ConversationService } from './conversation.service';
 
 /**
@@ -14,7 +12,7 @@ import { ConversationService } from './conversation.service';
  * rather than through a circular import.
  */
 @Module({
-  imports: [SttModule, LlmModule, TtsModule],
+  imports: [AiBridgeModule],
   providers: [ConversationService],
   exports: [ConversationService],
 })

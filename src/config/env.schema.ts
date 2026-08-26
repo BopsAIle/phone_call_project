@@ -37,6 +37,19 @@ export const envSchema = z.object({
   STORE_TIMEZONE: z.string().default('Europe/Berlin'),
   DEFAULT_LOCALE: z.enum(['en', 'de']).default('en'),
 
+  /**
+   * The AI team's voice service — see docs/integrations/ai-bridge-contract.md.
+   *
+   * **Optional only until the cutover.** Both become required in the commit that
+   * routes calls through the bridge; they are optional now so the app still
+   * boots for anyone who does not yet have AI-team credentials, while the
+   * pipeline below is still the live path. `AiBridgeService.createSession`
+   * throws if the URL is missing, so an unconfigured bridge cannot silently
+   * answer a call with silence.
+   */
+  AI_BRIDGE_URL: z.url().optional(),
+  AI_BRIDGE_TOKEN: z.string().min(1).optional(),
+
   LLM_MODEL: z.string().default('gpt-5.6-terra'),
   /**
    * Must be a model that supports `turn_detection`, or the session falls back to

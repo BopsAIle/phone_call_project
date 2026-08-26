@@ -178,10 +178,16 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
         break;
 
       case 'mark':
-        // Twilio echoes a mark once the audio queued ahead of it has finished
-        // playing. That is the only reliable "the agent has stopped talking"
-        // signal, so it has to reach the conversation, not just the log.
-        session.conversation?.onMarkPlayed(frame.mark.name);
+        /**
+         * Twilio echoes a mark once the audio queued ahead of it has finished
+         * playing — the only reliable "the agent has stopped talking" signal.
+         *
+         * Nothing consumes it any more. It was load-bearing for the turn state
+         * machine, and the AI service owns turn-taking now; it emits no
+         * end-of-response signal, so there is nothing to mark. Logged rather
+         * than removed because the dev client still injects marks to prove the
+         * wire protocol, and a silently swallowed frame is worse than a line.
+         */
         this.logger.debug(`Mark ${frame.mark.name} played`);
         break;
 
@@ -260,8 +266,8 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
         sink: this.sinkFor(session, streamSid),
       });
     } catch (error: unknown) {
-      // Audio beats conversation: a call that cannot reach OpenAI is still
-      // worth connecting, and Phase 6 turns this into a spoken apology.
+      // Audio beats conversation: a call that cannot reach the AI service is
+      // still worth connecting, and Phase 6 turns this into a spoken apology.
       this.logger.error(
         `Could not open a conversation for call ${callId}: ${
           error instanceof Error ? error.message : String(error)
@@ -269,11 +275,10 @@ export class MediaStreamGateway implements BeforeApplicationShutdown {
       );
     }
 
+    // No greeting call here any more: the AI service speaks it on receiving
+    // `session.init`, which its socket sends the moment it opens. Audio can
+    // therefore already be on its way back by this line.
     this.logger.log(`Stream ${streamSid} started for call ${callId}`);
-
-    // After the session is registered, so a mark echoing back off the greeting
-    // has somewhere to land.
-    await session.conversation?.start();
   }
 
   private loadCall(callId: string, streamSid: string) {
