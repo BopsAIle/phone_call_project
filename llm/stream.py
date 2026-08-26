@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, AsyncIterator, Callable, Protocol
 from zoneinfo import ZoneInfo
 
@@ -25,9 +25,11 @@ def build_system_prompt(*, store_name: str, timezone: str, locale: str) -> str:
     try:
         now = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M %Z")
     except Exception:
-        logger.warning("Invalid timezone %r; using UTC", timezone)
+        # Windows ships no IANA database, so ZoneInfo("UTC") fails here too when
+        # the tzdata package is missing. datetime.UTC is stdlib and always works.
+        logger.warning("Timezone %r unavailable; using UTC. Is tzdata installed?", timezone)
         tz_name = "UTC"
-        now = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M %Z")
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M %Z")
 
     lang = locale or "en"
     name = store_name or "the restaurant"
