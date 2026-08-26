@@ -71,7 +71,6 @@ class RealtimeTranscriptionClient:
         try:
             self._manager = self._client.realtime.connect(
                 extra_query={"intent": "transcription"},
-                max_retries=0,
             )
             self._connection = await self._manager.enter()
             await self._connection.session.update(session=self._session_payload(locale))
