@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Thu âm — AI Bridge</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Figtree:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div>
+          <p class="kicker">Demo trình duyệt</p>
+          <h1>Thu âm tới AI Bridge</h1>
+        </div>
+        <div class="health" id="healthBadge" data-state="unknown">
+          <span class="dot"></span>
+          <span id="healthLabel">Chưa kiểm tra server</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="stage">
+          <canvas id="scope" aria-hidden="true"></canvas>
+          <p class="status" id="statusLabel">Nhấn Gọi để mở micro và kết nối server AI.</p>
+          <p class="hint">Đeo tai nghe — loa máy sẽ lọt vào mic và dễ kích hoạt barge-in.</p>
+          <div class="controls">
+            <button type="button" class="btn call" id="callBtn">Gọi</button>
+            <button type="button" class="btn hang" id="hangBtn" disabled>Cúp</button>
+            <button type="button" class="btn ghost" id="muteBtn" disabled>Tắt mic</button>
+          </div>
+          <label class="vol">
+            <span>Âm lượng agent</span>
+            <input type="range" id="volume" min="0" max="1" step="0.05" value="1" />
+          </label>
+        </section>
+
+        <aside class="side">
+          <form class="panel" id="settingsForm">
+            <h2>Kết nối</h2>
+            <label>
+              WebSocket URL
+              <input id="wsUrl" name="wsUrl" spellcheck="false" autocomplete="off" />
+            </label>
+            <label>
+              Token (AI_BRIDGE_TOKEN)
+              <input id="token" name="token" type="password" autocomplete="off" />
+            </label>
+            <div class="grid2">
+              <label>
+                Tên cửa hàng
+                <input id="storeName" name="storeName" />
+              </label>
+              <label>
+                Locale
+                <select id="locale" name="locale">
+                  <option value="vi">vi — tiếng Việt</option>
+                  <option value="en">en — English</option>
+                  <option value="de">de — Deutsch</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              Múi giờ IANA
+              <input id="timezone" name="timezone" />
+            </label>
+            <label>
+              Câu chào (đọc nguyên văn lúc bắt máy)
+              <textarea id="greeting" name="greeting" rows="3"></textarea>
+            </label>
+            <button type="button" class="btn ghost full" id="pingBtn">Kiểm tra /health</button>
+          </form>
+
+          <section class="panel log-panel">
+            <div class="log-head">
+              <h2>Nhật ký</h2>
+              <button type="button" class="text-btn" id="clearLogBtn">Xóa</button>
+            </div>
+            <ol class="log" id="log" aria-live="polite"></ol>
+          </section>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
