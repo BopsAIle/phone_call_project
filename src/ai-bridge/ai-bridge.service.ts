@@ -132,6 +132,16 @@ export class AiBridgeSession implements AiSession {
    */
   private greeted = false;
 
+  /**
+   * Whether any agent audio has arrived on this call.
+   *
+   * Only used to log the first frame. "Connected but silent" and "connected and
+   * speaking" are the two outcomes that look identical from our side otherwise,
+   * and they have completely different causes — the first is theirs, the second
+   * means the fault is downstream in our own conversion or Twilio path.
+   */
+  private receivedAudio = false;
+
   private audio: Listener<[Buffer]> = noop;
   private interrupted: Listener<[]> = noop;
 
@@ -205,8 +215,25 @@ export class AiBridgeSession implements AiSession {
   private handleOpen(): void {
     this.attempt = 0;
 
-    this.socket?.send(sessionInit(this.context, { resumed: this.greeted }));
+    const resumed = this.greeted;
+    this.socket?.send(sessionInit(this.context, { resumed }));
     this.greeted = true;
+
+    /**
+     * Logged at `log`, not `debug`, and deliberately.
+     *
+     * Every other outcome on this socket is already loud — a rejected token, a
+     * reconnect, a malformed message. Success was the only path that said
+     * nothing, which made "are we actually talking to the AI service?"
+     * answerable only by silence. That is the first question anyone asks when
+     * bringing the integration up, and the last one they ask at three in the
+     * morning.
+     */
+    this.logger.log(
+      resumed
+        ? 'AI bridge reconnected; session.init resent as resumed'
+        : `AI bridge connected as ${this.context.storeName} (${this.context.locale})`,
+    );
 
     this.drain();
   }
@@ -252,6 +279,13 @@ export class AiBridgeSession implements AiSession {
 
     switch (message.kind) {
       case 'audio':
+        if (!this.receivedAudio) {
+          this.receivedAudio = true;
+          this.logger.log(
+            `First agent audio: ${message.pcm.length} bytes from the AI service`,
+          );
+        }
+
         this.audio(message.pcm);
         return;
 
