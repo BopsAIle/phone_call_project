@@ -1,11 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import type { Env } from '../config/env.schema';
-import { OpenAiLlmService } from '../llm/openai-llm.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { OpenAiRealtimeSttService } from '../stt/openai-realtime-stt.service';
-import { GreetingCache } from '../tts/greeting-cache';
-import { OpenAiTtsService } from '../tts/openai-tts.service';
 import type { OutboundAudioSink } from './audio-sink';
 import { CallSession } from './call-session';
 
@@ -22,11 +18,7 @@ export class ConversationService {
   private readonly defaultLocale: 'en' | 'de';
 
   constructor(
-    private readonly stt: OpenAiRealtimeSttService,
-    private readonly llm: OpenAiLlmService,
-    private readonly tts: OpenAiTtsService,
-    private readonly greetings: GreetingCache,
-    private readonly prisma: PrismaService,
+    private readonly ai: AiBridgeService,
     config: ConfigService<Env, true>,
   ) {
     this.defaultLocale = config.get('DEFAULT_LOCALE', { infer: true }) ?? 'en';
@@ -35,13 +27,15 @@ export class ConversationService {
   /**
    * Opens a conversation for one call.
    *
-   * The STT session resolves in a microtask — it buffers while its socket
+   * The AI session resolves in a microtask — it buffers while its socket
    * connects — so the caller can await this on Twilio's `start` without putting
    * a network round trip in front of the first audio frame.
    *
-   * The greeting is *not* played here. The gateway calls `start()` once the
-   * session is registered, so a mark echoing back cannot arrive before there is
-   * anything to route it to.
+   * The greeting is not played here, or anywhere in this repo: the AI service
+   * speaks it on receiving `session.init`, which happens the moment its socket
+   * opens. Audio can therefore start flowing back before this method returns,
+   * which is safe because the sink is a closure over the Twilio socket rather
+   * than a lookup in a registry this session is not yet in.
    */
   async create(opts: {
     callId: string;
@@ -52,26 +46,19 @@ export class ConversationService {
     sink: OutboundAudioSink;
     locale?: 'en' | 'de';
   }): Promise<CallSession> {
-    const locale = opts.locale ?? this.defaultLocale;
-
-    const stt = await this.stt.createSession({
-      locale,
+    const ai = await this.ai.createSession({
       callId: opts.callId,
+      storeName: opts.storeName,
+      timezone: opts.timezone,
+      locale: opts.locale ?? this.defaultLocale,
+      greeting: opts.greeting,
     });
 
     const session = new CallSession({
       callId: opts.callId,
       streamSid: opts.streamSid,
-      locale,
-      greeting: opts.greeting,
-      storeName: opts.storeName,
-      timezone: opts.timezone,
-      stt,
-      llm: this.llm,
-      tts: this.tts,
-      greetings: this.greetings,
+      ai,
       sink: opts.sink,
-      prisma: this.prisma,
     });
 
     this.sessions.set(opts.streamSid, session);

@@ -25,6 +25,16 @@ import { z } from 'zod';
  * changes.
  */
 
+/**
+ * 16 kHz, PCM16, mono, little-endian — both directions.
+ *
+ * A protocol fact rather than an audio one, which is why it lives here: it is
+ * the rate the AI team's service accepts, not a rate that improves anything. The
+ * caller arrives over the PSTN as 8 kHz mu-law, so there is no content above
+ * 4 kHz and the upsample adds no information.
+ */
+export const AI_SAMPLE_RATE = 16000;
+
 /** What the AI service needs in order to answer as this store. */
 export interface SessionContext {
   callId: string;

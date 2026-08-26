@@ -6,17 +6,12 @@ import { int16ToLe } from '../audio/pcm';
 import { Upsampler } from '../audio/resampler';
 import type { Env } from '../config/env.schema';
 import type { AiBridgeProvider, AiSession } from './ai-bridge.provider';
-import { parseInbound, sessionInit, type SessionContext } from './wire-format';
-
-/**
- * The rate the AI team asked for. See docs/integrations/ai-bridge-contract.md.
- *
- * Worth knowing while reading the rest of this file: the caller arrives over the
- * PSTN as 8 kHz mu-law, so there is no content above 4 kHz and this upsample
- * adds no information. It is done because the AI service takes 16 kHz, not
- * because it improves anything.
- */
-const AI_SAMPLE_RATE = 16000;
+import {
+  AI_SAMPLE_RATE,
+  parseInbound,
+  sessionInit,
+  type SessionContext,
+} from './wire-format';
 
 /**
  * Twilio's frame is 20 ms; five of them is ~100 ms per send.
@@ -48,6 +43,17 @@ const SOCKET_BUFFER_CAP_BYTES = 256 * 1024;
 
 /** Three attempts, then give up and let the call continue without the agent. */
 const RECONNECT_BACKOFF_MS = [200, 500, 1000];
+
+/**
+ * The AI service closes 1008 for a bad or missing token, and 1011 when its own
+ * pipeline crashes.
+ *
+ * 1008 is not worth retrying: the token that was rejected is the same token the
+ * next attempt would present, so the backoff would spend ~1.7 s proving it. Fail
+ * immediately and name the cause, because "the agent said nothing" is otherwise
+ * indistinguishable from a network problem.
+ */
+const CLOSE_UNAUTHORIZED = 1008;
 
 /**
  * The `ws` surface this session actually uses.
@@ -188,7 +194,7 @@ export class AiBridgeSession implements AiSession {
     socket.on('message', (raw: Buffer, isBinary: boolean) =>
       this.handleMessage(raw, isBinary),
     );
-    socket.on('close', () => this.handleClose());
+    socket.on('close', (code: number) => this.handleClose(code));
     socket.on('error', (error: Error) => {
       // Transport-level. `close` follows, and that is where reconnection is
       // decided — doing it here as well would double every backoff.
@@ -205,8 +211,17 @@ export class AiBridgeSession implements AiSession {
     this.drain();
   }
 
-  private handleClose(): void {
+  private handleClose(code?: number): void {
     if (this.closing || this.failed) return;
+
+    if (code === CLOSE_UNAUTHORIZED) {
+      this.failed = true;
+      this.logger.error(
+        'AI bridge rejected our credentials (1008); check AI_BRIDGE_TOKEN. ' +
+          'Not retrying — the call continues without the agent',
+      );
+      return;
+    }
 
     const backoff = RECONNECT_BACKOFF_MS[this.attempt];
 

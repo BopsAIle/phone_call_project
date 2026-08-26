@@ -1,10 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
-import type { OpenAiLlmService } from '../llm/openai-llm.service';
-import type { PrismaService } from '../prisma/prisma.service';
-import type { OpenAiRealtimeSttService } from '../stt/openai-realtime-stt.service';
-import type { SttSession } from '../stt/stt.provider';
-import type { GreetingCache } from '../tts/greeting-cache';
-import type { OpenAiTtsService } from '../tts/openai-tts.service';
+import type { AiSession } from '../ai-bridge/ai-bridge.provider';
+import type { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import type { OutboundAudioSink } from './audio-sink';
 import { ConversationService } from './conversation.service';
 
@@ -13,14 +9,11 @@ import { ConversationService } from './conversation.service';
  * it, because asserting on `session.close` detaches the method from its object
  * — which the lint rule rightly objects to.
  */
-function stubSttSession(close = jest.fn().mockResolvedValue(undefined)) {
-  const session: SttSession = {
+function stubAiSession(close = jest.fn().mockResolvedValue(undefined)) {
+  const session: AiSession = {
     pushAudio: jest.fn(),
-    onPartial: jest.fn(),
-    onFinal: jest.fn(),
-    onSpeechStarted: jest.fn(),
-    onSpeechStopped: jest.fn(),
-    setLocale: jest.fn(),
+    onAudio: jest.fn(),
+    onInterrupt: jest.fn(),
     close,
   };
 
@@ -28,7 +21,7 @@ function stubSttSession(close = jest.fn().mockResolvedValue(undefined)) {
 }
 
 // Held separately rather than read back off the object, for the same reason
-// the STT close mock is.
+// the AI close mock is.
 const playFrame = jest.fn();
 const sink: OutboundAudioSink = {
   playFrame,
@@ -44,23 +37,21 @@ const STORE = {
   sink,
 };
 
-function build(stt = stubSttSession()) {
-  const createSession = jest.fn().mockResolvedValue(stt.session);
+function build(ai = stubAiSession()) {
+  const createSession = jest.fn().mockResolvedValue(ai.session);
 
   const service = new ConversationService(
-    { createSession } as unknown as OpenAiRealtimeSttService,
-    { respond: jest.fn() } as unknown as OpenAiLlmService,
-    { synthesize: jest.fn() } as unknown as OpenAiTtsService,
-    { frames: jest.fn().mockResolvedValue([]) } as unknown as GreetingCache,
-    { utterance: { create: jest.fn() } } as unknown as PrismaService,
+    { createSession } as unknown as AiBridgeService,
     { get: jest.fn().mockReturnValue('en') } as unknown as ConfigService<
       never,
       true
     >,
   );
 
-  return { service, createSession, close: stt.close };
+  return { service, createSession, close: ai.close };
 }
+
+beforeEach(() => playFrame.mockClear());
 
 describe('ConversationService', () => {
   it('registers a new conversation under its streamSid', async () => {
@@ -75,8 +66,12 @@ describe('ConversationService', () => {
     expect(service.get('MZ1')).toBe(created);
   });
 
-  /** Log correlation: a transcription error has to name the call it came from. */
-  it('passes the call id and locale down to the transcription session', async () => {
+  /**
+   * The whole handshake in one assertion. The AI service composes no prompt of
+   * its own, so every one of these fields has to arrive or the call is degraded:
+   * no greeting, no store name, and "tonight" resolving against the wrong clock.
+   */
+  it('passes the full store context to the AI session', async () => {
     const { service, createSession } = build();
 
     await service.create({
@@ -88,7 +83,10 @@ describe('ConversationService', () => {
 
     expect(createSession).toHaveBeenCalledWith({
       callId: 'call_1',
+      storeName: 'Trattoria Bella',
+      timezone: 'Europe/Berlin',
       locale: 'de',
+      greeting: STORE.greeting,
     });
   });
 
@@ -97,17 +95,17 @@ describe('ConversationService', () => {
 
     await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
 
-    expect(createSession).toHaveBeenCalledWith({
-      callId: 'call_1',
-      locale: 'en',
-    });
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ locale: 'en' }),
+    );
   });
 
   /**
-   * The greeting is the gateway's call to make, after the session is registered
-   * — otherwise a mark echoing back off it has nowhere to land.
+   * The greeting moved to the AI service, which speaks it on `session.init`.
+   * Nothing in this repo synthesises audio any more, so `create` must not put a
+   * frame on the wire itself.
    */
-  it('does not play the greeting on create', async () => {
+  it('plays no audio of its own on create', async () => {
     const { service } = build();
 
     await service.create({ callId: 'call_1', streamSid: 'MZ1', ...STORE });
@@ -175,7 +173,7 @@ describe('ConversationService', () => {
     /** A failing close must not stop the call being finalised. */
     it('swallows a close failure', async () => {
       const { service } = build(
-        stubSttSession(
+        stubAiSession(
           jest.fn().mockRejectedValue(new Error('socket already gone')),
         ),
       );

@@ -1,631 +1,327 @@
-import { Role } from '../generated/prisma/enums';
-import type { LlmProvider } from '../llm/llm.provider';
-import type { ChatMessage, ToolCall } from '../llm/llm.types';
-import type { PrismaService } from '../prisma/prisma.service';
-import type { SttSession } from '../stt/stt.provider';
-import type { GreetingCache } from '../tts/greeting-cache';
-import type { TtsProvider } from '../tts/tts.provider';
+import type { AiSession } from '../ai-bridge/ai-bridge.provider';
+import { AI_SAMPLE_RATE } from '../ai-bridge/wire-format';
+import {
+  MULAW_FRAME_BYTES,
+  decodeMulaw,
+  encodeMulaw,
+} from '../audio/mulaw.codec';
+import { int16ToLe } from '../audio/pcm';
+import { Upsampler } from '../audio/resampler';
 import type { OutboundAudioSink } from './audio-sink';
 import { CallSession } from './call-session';
 
-/** An `SttSession` whose events the test fires by hand. */
-class FakeStt implements SttSession {
-  readonly pushed: Buffer[] = [];
-  closed = false;
-  locale?: 'en' | 'de';
-
-  private partial: (text: string) => void = () => {};
-  private final: (
-    text: string,
-    meta: { startMs: number; endMs: number },
-  ) => void = () => {};
-  private started: () => void = () => {};
-  private stopped: () => void = () => {};
-
-  pushAudio(mulaw8k: Buffer): void {
-    this.pushed.push(mulaw8k);
-  }
-
-  onPartial(cb: (text: string) => void): void {
-    this.partial = cb;
-  }
-
-  onFinal(
-    cb: (text: string, meta: { startMs: number; endMs: number }) => void,
-  ): void {
-    this.final = cb;
-  }
-
-  onSpeechStarted(cb: () => void): void {
-    this.started = cb;
-  }
-
-  onSpeechStopped(cb: () => void): void {
-    this.stopped = cb;
-  }
-
-  setLocale(locale: 'en' | 'de'): void {
-    this.locale = locale;
-  }
-
-  close(): Promise<void> {
-    this.closed = true;
-    return Promise.resolve();
-  }
-
-  emitPartial(text: string): void {
-    this.partial(text);
-  }
-
-  emitFinal(text: string, meta = { startMs: 0, endMs: 100 }): void {
-    this.final(text, meta);
-  }
-
-  emitSpeechStarted(): void {
-    this.started();
-  }
-
-  emitSpeechStopped(): void {
-    this.stopped();
-  }
+/** One 20 ms Twilio frame: 160 mu-law bytes. */
+function twilioFrame(): Buffer {
+  return encodeMulaw(new Int16Array(160).fill(1000));
 }
 
 /**
- * One macrotask.
+ * `n` samples of agent audio at 16 kHz, as the AI service would send them.
  *
- * The fakes below pause on this rather than on a resolved promise, so that a
- * test advancing the clock one tick at a time sees one sentence or one frame at
- * a time. A microtask-paced fake runs an entire turn to completion inside a
- * single tick, leaving no mid-reply moment to interrupt.
+ * A tone rather than silence: the assertions below are about byte counts and
+ * alignment, but a resampler bug that produced silence would still pass a
+ * length check, and this makes the round-trip test in `mulaw.codec` meaningful.
  */
-const tick = () => new Promise((resolve) => setImmediate(resolve));
+function agentAudio(samples: number, amplitude = 8000): Buffer {
+  const pcm = new Int16Array(samples);
 
-/**
- * Yields one scripted reply per call, pausing between sentences so a test can
- * interrupt mid-reply the way a real caller does.
- */
-class FakeLlm implements LlmProvider {
-  /** Sentences to yield, one array per successive `respond` call. */
-  script: string[][] = [];
-  /** The full message list each call was given, copied at call time. */
-  readonly requests: ChatMessage[][] = [];
-
-  respond(opts: { messages: ChatMessage[]; signal: AbortSignal }): {
-    sentences: AsyncIterable<string>;
-    toolCalls: Promise<ToolCall[]>;
-  } {
-    this.requests.push(opts.messages.map((message) => ({ ...message })));
-
-    const sentences = this.script.shift() ?? [];
-    let settle!: (calls: ToolCall[]) => void;
-    const toolCalls = new Promise<ToolCall[]>((resolve) => {
-      settle = resolve;
-    });
-
-    async function* stream(): AsyncGenerator<string> {
-      try {
-        for (const sentence of sentences) {
-          await tick();
-          if (opts.signal.aborted) return;
-
-          yield sentence;
-        }
-      } finally {
-        settle([]);
-      }
-    }
-
-    return { sentences: stream(), toolCalls };
+  for (let i = 0; i < samples; i++) {
+    pcm[i] = Math.round(
+      amplitude * Math.sin((2 * Math.PI * 440 * i) / AI_SAMPLE_RATE),
+    );
   }
+
+  return int16ToLe(pcm);
 }
 
-class FakeTts implements TtsProvider {
-  framesPerSentence = 2;
-  readonly synthesised: string[] = [];
-
-  async *synthesize(opts: {
-    text: string;
-    signal: AbortSignal;
-  }): AsyncGenerator<Buffer> {
-    this.synthesised.push(opts.text);
-
-    for (let i = 0; i < this.framesPerSentence; i++) {
-      await tick();
-      if (opts.signal.aborted) return;
-
-      yield Buffer.alloc(160, i + 1);
-    }
-  }
+interface Built {
+  session: CallSession;
+  /** Fires whatever `CallSession` registered via `ai.onAudio`. */
+  emitAudio: (pcm: Buffer) => void;
+  emitInterrupt: () => void;
+  pushAudio: jest.Mock;
+  playFrame: jest.Mock;
+  clear: jest.Mock;
+  aiClose: jest.Mock;
 }
 
-function fakeSink() {
-  const frames: Buffer[] = [];
-  const marks: string[] = [];
-  const state = { clears: 0 };
+function build(): Built {
+  let onAudio: (pcm: Buffer) => void = () => undefined;
+  let onInterrupt: () => void = () => undefined;
 
-  const sink: OutboundAudioSink = {
-    playFrame: (frame) => frames.push(frame),
-    mark: (name) => marks.push(name),
-    clear: () => state.clears++,
+  const pushAudio = jest.fn();
+  const aiClose = jest.fn().mockResolvedValue(undefined);
+
+  const ai: AiSession = {
+    pushAudio,
+    onAudio: (cb) => {
+      onAudio = cb;
+    },
+    onInterrupt: (cb) => {
+      onInterrupt = cb;
+    },
+    close: aiClose,
   };
 
-  return { sink, frames, marks, state };
-}
-
-const GREETING = 'Hello, you are speaking with an automated assistant.';
-
-function build(
-  options: {
-    create?: jest.Mock;
-    greetingFrames?: Buffer[];
-    greetingError?: Error;
-  } = {},
-) {
-  const create = options.create ?? jest.fn().mockResolvedValue({});
-  const stt = new FakeStt();
-  const llm = new FakeLlm();
-  const tts = new FakeTts();
-  const { sink, frames, marks, state } = fakeSink();
-
-  const greetingFrames = options.greetingFrames ?? [Buffer.alloc(160, 9)];
-
-  // Held separately rather than read back off the object, because asserting on
-  // `greetings.frames` detaches the method from it — which the lint rule
-  // rightly objects to.
-  const requestGreeting = options.greetingError
-    ? jest.fn().mockRejectedValue(options.greetingError)
-    : jest.fn().mockResolvedValue(greetingFrames);
-
-  const greetings = { frames: requestGreeting } as unknown as GreetingCache;
+  const playFrame = jest.fn();
+  const clear = jest.fn();
+  const sink: OutboundAudioSink = { playFrame, clear, mark: jest.fn() };
 
   const session = new CallSession({
     callId: 'call_1',
     streamSid: 'MZ1',
-    locale: 'en',
-    greeting: GREETING,
-    storeName: 'Trattoria Bella',
-    timezone: 'Europe/Berlin',
-    stt,
-    llm,
-    tts,
-    greetings,
+    ai,
     sink,
-    prisma: { utterance: { create } } as unknown as PrismaService,
   });
 
   return {
     session,
-    stt,
-    llm,
-    tts,
-    frames,
-    marks,
-    state,
-    create,
-    requestGreeting,
+    emitAudio: (pcm) => onAudio(pcm),
+    emitInterrupt: () => onInterrupt(),
+    pushAudio,
+    playFrame,
+    clear,
+    aiClose,
   };
 }
 
-/** The `data` of every Utterance row written, in order. */
-function rows(create: jest.Mock): Record<string, unknown>[] {
-  return create.mock.calls.map(
-    ([arg]) => (arg as { data: Record<string, unknown> }).data,
-  );
-}
-
-/** Lets the fire-and-forget turn and persistence work settle. */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 40; i++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-}
-
-/** Waits until the agent has actually started writing frames. */
-async function untilSpeaking(built: ReturnType<typeof build>): Promise<void> {
-  for (let i = 0; i < 50 && built.session.turnState !== 'SPEAKING'; i++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-}
-
-/** Runs one complete turn and returns once the agent is speaking. */
-async function speakOneTurn(
-  built: ReturnType<typeof build>,
-  reply: string[] = ['First sentence.', 'Second sentence.'],
-): Promise<void> {
-  built.llm.script.push(reply);
-  built.stt.emitSpeechStopped();
-  built.stt.emitFinal('may I book a table for two');
-  await settle();
+function framesPlayed(playFrame: jest.Mock): Buffer[] {
+  return playFrame.mock.calls.map(([frame]) => frame as Buffer);
 }
 
 describe('CallSession', () => {
-  it('forwards audio to the transcription session', () => {
-    const { session, stt } = build();
+  describe('caller audio', () => {
+    it('hands Twilio frames straight to the AI session', () => {
+      const built = build();
+      const frame = twilioFrame();
 
-    session.pushAudio(Buffer.from([1, 2, 3]));
+      built.session.pushAudio(frame);
 
-    expect(stt.pushed).toEqual([Buffer.from([1, 2, 3])]);
+      expect(built.pushAudio).toHaveBeenCalledWith(frame);
+    });
+
+    it('stops forwarding once closed', async () => {
+      const built = build();
+      await built.session.close();
+
+      built.session.pushAudio(twilioFrame());
+
+      expect(built.pushAudio).not.toHaveBeenCalled();
+    });
   });
 
-  it('starts in GREETING', () => {
-    expect(build().session.turnState).toBe('GREETING');
-  });
-
-  describe('the greeting', () => {
-    it('plays the cached frames and marks the end', async () => {
-      const built = build({
-        greetingFrames: [Buffer.alloc(160, 1), Buffer.alloc(160, 2)],
-      });
-
-      await built.session.start();
-
-      expect(built.frames).toHaveLength(2);
-      expect(built.marks).toHaveLength(1);
-    });
-
-    /** Silence at pickup makes callers say "hello?" or hang up. */
-    it('does not wait for the caller to speak first', async () => {
+  describe('agent audio', () => {
+    /**
+     * 16 kHz halves to 8 kHz, and mu-law is one byte per sample, so 1600 samples
+     * of PCM16 (3200 bytes) becomes 800 mu-law bytes — exactly five 160-byte
+     * Twilio frames.
+     */
+    it('converts 16 kHz PCM16 into whole 20 ms mu-law frames', () => {
       const built = build();
 
-      await built.session.start();
+      built.emitAudio(agentAudio(1600));
 
-      expect(built.requestGreeting).toHaveBeenCalledWith(
-        expect.objectContaining({ text: GREETING, locale: 'en' }),
-      );
+      const frames = framesPlayed(built.playFrame);
+      expect(frames).toHaveLength(5);
+      for (const frame of frames) {
+        expect(frame).toHaveLength(MULAW_FRAME_BYTES);
+      }
     });
 
-    it('listens once Twilio reports the greeting has finished playing', async () => {
+    it('holds back a partial frame rather than padding mid-stream', () => {
       const built = build();
-      await built.session.start();
 
-      expect(built.session.turnState).toBe('GREETING');
-      built.session.onMarkPlayed(built.marks[0]);
+      // 500 samples → 250 mu-law bytes → one whole frame, 90 bytes held.
+      built.emitAudio(agentAudio(500));
 
-      expect(built.session.turnState).toBe('LISTENING');
+      expect(built.playFrame).toHaveBeenCalledTimes(1);
     });
 
-    it('is recorded as an AGENT utterance', async () => {
-      const built = build();
+    it('joins audio across frames instead of restarting at each boundary', () => {
+      const whole = build();
+      whole.emitAudio(agentAudio(1600));
 
-      await built.session.start();
-      await settle();
+      const split = build();
+      const source = agentAudio(1600);
+      // A boundary that lands mid-frame, as a synthesiser's chunking would.
+      split.emitAudio(source.subarray(0, 1000));
+      split.emitAudio(source.subarray(1000));
 
-      expect(rows(built.create)).toContainEqual(
-        expect.objectContaining({
-          role: Role.AGENT,
-          text: GREETING,
-          startMs: 0,
-          endMs: null,
-        }),
+      expect(framesPlayed(split.playFrame)).toEqual(
+        framesPlayed(whole.playFrame),
       );
     });
 
     /**
-     * A call with no greeting is far better than a call that drops. Phase 6
-     * turns this into a spoken apology rather than an awkward silence.
+     * The AI service guarantees whole samples, but `leToInt16` drops a trailing
+     * odd byte by design — and one dropped byte shifts every sample after it,
+     * which is not silence but loud static. This asserts the carry, by splitting
+     * on an odd boundary and requiring the output to match the unsplit stream.
      */
-    it('falls back to listening when synthesis fails', async () => {
-      const built = build({ greetingError: new Error('openai is down') });
+    it('carries a sample split across two frames', () => {
+      const whole = build();
+      whole.emitAudio(agentAudio(1600));
 
-      await expect(built.session.start()).resolves.toBeUndefined();
+      const split = build();
+      const source = agentAudio(1600);
+      split.emitAudio(source.subarray(0, 999));
+      split.emitAudio(source.subarray(999));
 
-      expect(built.session.turnState).toBe('LISTENING');
-    });
-  });
-
-  describe('a full turn', () => {
-    it('moves LISTENING → SPEAKING and writes frames for every sentence', async () => {
-      const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
-      built.frames.length = 0;
-      built.marks.length = 0;
-
-      await speakOneTurn(built);
-
-      expect(built.tts.synthesised).toEqual([
-        'First sentence.',
-        'Second sentence.',
-      ]);
-      expect(built.frames).toHaveLength(4);
-      expect(built.session.turnState).toBe('SPEAKING');
-    });
-
-    it('sends one mark per sentence, so a long reply reports progress', async () => {
-      const built = build();
-      await built.session.start();
-      built.marks.length = 0;
-
-      await speakOneTurn(built);
-
-      expect(built.marks).toHaveLength(2);
-    });
-
-    it('returns to LISTENING only once every mark has echoed back', async () => {
-      const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
-      built.marks.length = 0;
-
-      await speakOneTurn(built);
-
-      built.session.onMarkPlayed(built.marks[0]);
-      expect(built.session.turnState).toBe('SPEAKING');
-
-      built.session.onMarkPlayed(built.marks[1]);
-      expect(built.session.turnState).toBe('LISTENING');
-    });
-
-    it('persists the reply as one AGENT utterance with its latency', async () => {
-      const built = build();
-      await built.session.start();
-      built.create.mockClear();
-
-      await speakOneTurn(built);
-
-      expect(rows(built.create)).toContainEqual(
-        expect.objectContaining({
-          role: Role.AGENT,
-          text: 'First sentence. Second sentence.',
-          endMs: null,
-          latencyMs: expect.any(Number) as number,
-        }),
+      expect(framesPlayed(split.playFrame)).toEqual(
+        framesPlayed(whole.playFrame),
       );
     });
 
-    it('feeds the reply back into history for the next turn', async () => {
+    it('survives an empty frame', () => {
       const built = build();
-      await built.session.start();
 
-      await speakOneTurn(built, ['First reply.']);
-      built.session.onMarkPlayed(built.marks[built.marks.length - 1]);
-      await speakOneTurn(built, ['Second reply.']);
-
-      const second = built.llm.requests[1];
-      expect(second.map((message) => message.role)).toEqual([
-        'system',
-        'assistant',
-        'user',
-        'assistant',
-        'user',
-      ]);
-      expect(second[3].content).toBe('First reply.');
+      expect(() => built.emitAudio(Buffer.alloc(0))).not.toThrow();
+      expect(built.playFrame).not.toHaveBeenCalled();
     });
 
-    /** The model said nothing. Do not sit in THINKING waiting for a mark. */
-    it('recovers to LISTENING when the model produces no text', async () => {
+    it('preserves the signal rather than emitting silence', () => {
       const built = build();
-      await built.session.start();
 
-      await speakOneTurn(built, []);
+      built.emitAudio(agentAudio(1600));
 
-      expect(built.session.turnState).toBe('LISTENING');
+      const peak = framesPlayed(built.playFrame)
+        .flatMap((frame) => Array.from(decodeMulaw(frame)))
+        .reduce((max, sample) => Math.max(max, Math.abs(sample)), 0);
+
+      // Down 8 kHz and through mu-law, but nowhere near silent.
+      expect(peak).toBeGreaterThan(4000);
+    });
+
+    it('plays nothing once closed', async () => {
+      const built = build();
+      await built.session.close();
+      built.playFrame.mockClear();
+
+      built.emitAudio(agentAudio(1600));
+
+      expect(built.playFrame).not.toHaveBeenCalled();
     });
   });
 
   describe('barge-in', () => {
-    it('aborts, clears Twilio’s buffer, and listens', async () => {
+    it('clears the Twilio buffer when the AI service reports an interrupt', () => {
       const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
 
-      await speakOneTurn(built);
-      expect(built.session.turnState).toBe('SPEAKING');
+      built.emitInterrupt();
 
-      built.stt.emitSpeechStarted();
-
-      expect(built.state.clears).toBe(1);
-      expect(built.session.turnState).toBe('LISTENING');
+      expect(built.clear).toHaveBeenCalledTimes(1);
     });
 
     /**
-     * The `clear` is the step that is easy to forget: aborting our own streams
-     * does nothing about audio Twilio has already buffered.
+     * The partial frame belongs to the abandoned turn. Left in place it would be
+     * prepended to the first frame of the next reply, splicing the tail of a
+     * sentence the caller interrupted onto the start of the answer.
      */
-    it('stops writing frames once interrupted', async () => {
+    it('drops the partial frame held from the interrupted turn', () => {
       const built = build();
-      built.tts.framesPerSentence = 50;
-      await built.session.start();
 
-      built.llm.script.push(['A long reply.', 'Still going.']);
-      built.stt.emitFinal('hello');
-      await untilSpeaking(built);
+      // 90 mu-law bytes held back, not yet a whole frame.
+      built.emitAudio(agentAudio(500));
+      built.playFrame.mockClear();
 
-      built.stt.emitSpeechStarted();
-      const written = built.frames.length;
-      await settle();
+      built.emitInterrupt();
 
-      expect(built.frames.length).toBe(written);
-    });
+      // 320 samples → 160 mu-law bytes → exactly one frame, if nothing was
+      // carried over from before the interrupt.
+      built.emitAudio(agentAudio(320));
 
-    it('drops queued sentences that were never synthesised', async () => {
-      const built = build();
-      built.tts.framesPerSentence = 30;
-      await built.session.start();
-
-      built.llm.script.push(['One.', 'Two.', 'Three.']);
-      built.stt.emitFinal('hello');
-      await untilSpeaking(built);
-
-      built.stt.emitSpeechStarted();
-      await settle();
-
-      expect(built.tts.synthesised.length).toBeLessThan(3);
+      expect(built.playFrame).toHaveBeenCalledTimes(1);
     });
 
     /**
-     * The signal behind `onSpeechStarted` is a transcript-activity gate, not a
-     * VAD edge, so during THINKING it almost always means the caller's own
-     * sentence continuing after a pause the endpointer called early. There is
-     * also no audio playing to interrupt. Cancelling would throw away a turn the
-     * merge is about to complete correctly.
+     * The AI service sends `interrupt` as soon as its VAD fires, which can be
+     * before it has sent any audio for that turn. Clearing an empty buffer is a
+     * no-op and must not be treated as a protocol violation.
      */
-    it('is ignored while THINKING, because nothing is playing yet', async () => {
+    it('tolerates an interrupt with nothing playing', () => {
       const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
 
-      built.llm.script.push(['A reply.']);
-      built.stt.emitFinal('hello');
-      expect(built.session.turnState).toBe('THINKING');
+      expect(() => {
+        built.emitInterrupt();
+        built.emitInterrupt();
+      }).not.toThrow();
 
-      built.stt.emitSpeechStarted();
-      expect(built.state.clears).toBe(0);
-
-      await settle();
-
-      // The turn survived and spoke.
-      expect(built.tts.synthesised).toEqual(['A reply.']);
-      expect(built.session.turnState).toBe('SPEAKING');
+      expect(built.clear).toHaveBeenCalledTimes(2);
     });
 
-    /** Nothing is playing, so there is nothing to interrupt. */
-    it('is ignored while LISTENING', async () => {
+    it('is also reachable directly, for the dev client', () => {
       const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
 
-      built.stt.emitSpeechStarted();
+      built.session.interrupt();
 
-      expect(built.state.clears).toBe(0);
-      expect(built.session.turnState).toBe('LISTENING');
+      expect(built.clear).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('close', () => {
+    /**
+     * The AI service sends no end-of-response signal, so the frame buffer holds
+     * anything under 160 bytes until the next audio arrives. At the end of the
+     * call there is no next audio — without this flush the last fragment of the
+     * final utterance is dropped.
+     */
+    it('flushes the held tail so the last syllable is not lost', async () => {
+      const built = build();
+
+      built.emitAudio(agentAudio(500));
+      const before = built.playFrame.mock.calls.length;
+
+      await built.session.close();
+
+      expect(built.playFrame.mock.calls.length).toBe(before + 1);
+      expect(framesPlayed(built.playFrame).at(-1)).toHaveLength(
+        MULAW_FRAME_BYTES,
+      );
+    });
+
+    it('plays no tail when nothing is held', async () => {
+      const built = build();
+
+      built.emitAudio(agentAudio(1600));
+      const before = built.playFrame.mock.calls.length;
+
+      await built.session.close();
+
+      expect(built.playFrame.mock.calls.length).toBe(before);
+    });
+
+    it('closes the AI session', async () => {
+      const built = build();
+
+      await built.session.close();
+
+      expect(built.aiClose).toHaveBeenCalledTimes(1);
     });
   });
 
   /**
-   * `gpt-live-transcribe` chunks audio itself, so one spoken turn can arrive as
-   * two finals. Without merging, that is two replies talking over each other.
+   * Not a unit of `CallSession` so much as the property the whole bridge exists
+   * to preserve: audio that goes up at 16 kHz and comes back down still sounds
+   * like the same tone. A ratio or gain error in either direction breaks this
+   * while every length assertion above still passes.
    */
-  describe('a second final in the same caller turn', () => {
-    it('merges it into the pending message and restarts the completion', async () => {
-      const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
-
-      built.llm.script.push(['Abandoned reply.'], ['Merged reply.']);
-
-      built.stt.emitFinal('I would like a table.');
-      expect(built.session.turnState).toBe('THINKING');
-      built.stt.emitFinal('For four people.');
-
-      await settle();
-
-      expect(built.llm.requests).toHaveLength(2);
-      const restarted = built.llm.requests[1];
-      expect(restarted[restarted.length - 1].content).toBe(
-        'I would like a table. For four people.',
-      );
-    });
-
-    it('speaks only the merged reply, never both', async () => {
-      const built = build();
-      await built.session.start();
-      built.marks.length = 0;
-
-      built.llm.script.push(['Abandoned reply.'], ['Merged reply.']);
-
-      built.stt.emitFinal('I would like a table.');
-      built.stt.emitFinal('For four people.');
-      await settle();
-
-      expect(built.tts.synthesised).toEqual(['Merged reply.']);
-    });
-  });
-
-  describe('transcripts', () => {
-    it('persists a final with the VAD boundaries', async () => {
-      const built = build();
-
-      built.stt.emitFinal('a table for four', { startMs: 1200, endMs: 3400 });
-      await settle();
-
-      expect(rows(built.create)).toContainEqual(
-        expect.objectContaining({
-          callId: 'call_1',
-          role: Role.CALLER,
-          text: 'a table for four',
-          startMs: 1200,
-          endMs: 3400,
-        }),
-      );
-    });
-
-    /** Partials revise themselves several times per sentence. */
-    it('never persists a partial', async () => {
-      const built = build();
-
-      built.stt.emitPartial('a table');
-      built.stt.emitPartial('a table for');
-      await settle();
-
-      expect(built.create).not.toHaveBeenCalled();
-    });
-
-    it('ignores an empty final rather than starting a turn on it', async () => {
-      const built = build();
-      await built.session.start();
-      built.session.onMarkPlayed(built.marks[0]);
-
-      built.stt.emitFinal('   ');
-      await settle();
-
-      expect(built.llm.requests).toHaveLength(0);
-      expect(built.session.turnState).toBe('LISTENING');
-    });
-
-    /**
-     * A phone call must not end because Postgres hiccuped. An unhandled
-     * rejection inside a socket handler takes down every other call too.
-     */
-    it('survives a database failure without throwing', async () => {
-      const built = build({
-        create: jest.fn().mockRejectedValue(new Error('connection terminated')),
-      });
-
-      expect(() => built.stt.emitFinal('a table for four')).not.toThrow();
-      await settle();
-
-      expect(() => built.session.pushAudio(Buffer.from([1]))).not.toThrow();
-    });
-  });
-
-  it('ignores a mark it never sent', async () => {
-    const built = build();
-    await built.session.start();
-
-    expect(() => built.session.onMarkPlayed('dev-12345')).not.toThrow();
-    expect(built.session.turnState).toBe('GREETING');
-  });
-
-  it('closes the transcription session', async () => {
+  it('round-trips a tone through both conversions at recognisable level', () => {
     const built = build();
 
-    await built.session.close();
+    const caller = new Int16Array(1600);
+    for (let i = 0; i < caller.length; i++) {
+      caller[i] = Math.round(8000 * Math.sin((2 * Math.PI * 440 * i) / 8000));
+    }
 
-    expect(built.stt.closed).toBe(true);
-  });
+    // What the AI service would receive, then echo straight back.
+    const upsampled = int16ToLe(new Upsampler(AI_SAMPLE_RATE).process(caller));
+    built.emitAudio(upsampled);
 
-  it('stops speaking when the call closes mid-reply', async () => {
-    const built = build();
-    built.tts.framesPerSentence = 50;
-    await built.session.start();
+    const peak = framesPlayed(built.playFrame)
+      .flatMap((frame) => Array.from(decodeMulaw(frame)))
+      .reduce((max, sample) => Math.max(max, Math.abs(sample)), 0);
 
-    built.llm.script.push(['A long reply.']);
-    built.stt.emitFinal('hello');
-    await Promise.resolve();
-
-    await built.session.close();
-    const written = built.frames.length;
-    await settle();
-
-    expect(built.frames.length).toBe(written);
-  });
-
-  it('passes a locale change through to transcription', () => {
-    const built = build();
-
-    built.session.setLocale('de');
-
-    expect(built.stt.locale).toBe('de');
+    expect(peak).toBeGreaterThan(8000 * 0.8);
+    expect(peak).toBeLessThan(8000 * 1.2);
   });
 });
