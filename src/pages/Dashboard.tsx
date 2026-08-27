@@ -93,16 +93,16 @@ export const Dashboard: React.FC = () => {
           <Card
             hoverable
             style={{
-              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-              color: '#fff',
+              background: '#f6ede5',
+              borderLeft: '4px solid #D4663A',
               border: 'none',
             }}
           >
             <Statistic
-              title={<span style={{ color: 'rgba(255, 255, 255, 0.8)' }}>Nhà hàng</span>}
+              title={<span style={{ color: 'rgba(0, 0, 0, 0.65)' }}>Nhà hàng</span>}
               value={restaurants?.length || 0}
-              prefix={<ShopOutlined style={{ color: '#fff' }} />}
-              valueStyle={{ color: '#fff', fontSize: '28px' }}
+              prefix={<ShopOutlined style={{ color: '#D4663A' }} />}
+              valueStyle={{ color: '#D4663A', fontSize: '28px' }}
             />
           </Card>
         </Col>
@@ -111,16 +111,16 @@ export const Dashboard: React.FC = () => {
           <Card
             hoverable
             style={{
-              background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-              color: '#fff',
+              background: '#faf4f0',
+              borderLeft: '4px solid #E8956F',
               border: 'none',
             }}
           >
             <Statistic
-              title={<span style={{ color: 'rgba(255, 255, 255, 0.8)' }}>Chi nhánh</span>}
+              title={<span style={{ color: 'rgba(0, 0, 0, 0.65)' }}>Chi nhánh</span>}
               value={branches?.length || 0}
-              prefix={<TeamOutlined style={{ color: '#fff' }} />}
-              valueStyle={{ color: '#fff', fontSize: '28px' }}
+              prefix={<TeamOutlined style={{ color: '#E8956F' }} />}
+              valueStyle={{ color: '#E8956F', fontSize: '28px' }}
             />
           </Card>
         </Col>
@@ -129,16 +129,16 @@ export const Dashboard: React.FC = () => {
           <Card
             hoverable
             style={{
-              background: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-              color: '#fff',
+              background: '#ecf3f8',
+              borderLeft: '4px solid #6BA3D8',
               border: 'none',
             }}
           >
             <Statistic
-              title={<span style={{ color: 'rgba(255, 255, 255, 0.8)' }}>Tổng đặt bàn</span>}
+              title={<span style={{ color: 'rgba(0, 0, 0, 0.65)' }}>Tổng đặt bàn</span>}
               value={stats?.totalBookings || 0}
-              prefix={<CalendarOutlined style={{ color: '#fff' }} />}
-              valueStyle={{ color: '#fff', fontSize: '28px' }}
+              prefix={<CalendarOutlined style={{ color: '#6BA3D8' }} />}
+              valueStyle={{ color: '#6BA3D8', fontSize: '28px' }}
             />
           </Card>
         </Col>
@@ -147,16 +147,16 @@ export const Dashboard: React.FC = () => {
           <Card
             hoverable
             style={{
-              background: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-              color: '#fff',
+              background: '#fef8f0',
+              borderLeft: '4px solid #F4A460',
               border: 'none',
             }}
           >
             <Statistic
-              title={<span style={{ color: 'rgba(255, 255, 255, 0.8)' }}>Đang chờ</span>}
+              title={<span style={{ color: 'rgba(0, 0, 0, 0.65)' }}>Đang chờ</span>}
               value={stats?.pendingBookings || 0}
-              prefix={<ClockCircleOutlined style={{ color: '#fff' }} />}
-              valueStyle={{ color: '#fff', fontSize: '28px' }}
+              prefix={<ClockCircleOutlined style={{ color: '#F4A460' }} />}
+              valueStyle={{ color: '#F4A460', fontSize: '28px' }}
             />
           </Card>
         </Col>
@@ -238,36 +238,36 @@ export const Dashboard: React.FC = () => {
       </Card>
 
       {/* Quick Stats Summary */}
-      <Card style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: '#fff', border: 'none' }}>
+      <Card style={{ background: '#f6ede5', border: '1px solid #e8ddd0', borderRadius: '8px' }}>
         <Row gutter={[32, 32]}>
           <Col xs={24} sm={12} lg={6}>
             <div>
-              <p style={{ margin: 0, opacity: 0.8, fontSize: '12px' }}>Tỉ lệ hoàn thành</p>
-              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600 }}>
+              <p style={{ margin: 0, color: 'rgba(0, 0, 0, 0.65)', fontSize: '12px' }}>Tỉ lệ hoàn thành</p>
+              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600, color: '#D4663A' }}>
                 {stats?.totalBookings ? Math.round(((bookings?.filter(b => b.status === 'completed').length || 0) / stats.totalBookings) * 100) : 0}%
               </p>
             </div>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <div>
-              <p style={{ margin: 0, opacity: 0.8, fontSize: '12px' }}>Tỉ lệ xác nhận</p>
-              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600 }}>
+              <p style={{ margin: 0, color: 'rgba(0, 0, 0, 0.65)', fontSize: '12px' }}>Tỉ lệ xác nhận</p>
+              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600, color: '#D4663A' }}>
                 {stats?.totalBookings ? Math.round(((stats.confirmedBookings || 0) / stats.totalBookings) * 100) : 0}%
               </p>
             </div>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <div>
-              <p style={{ margin: 0, opacity: 0.8, fontSize: '12px' }}>Tỉ lệ hủy</p>
-              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600 }}>
+              <p style={{ margin: 0, color: 'rgba(0, 0, 0, 0.65)', fontSize: '12px' }}>Tỉ lệ hủy</p>
+              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600, color: '#D4663A' }}>
                 {stats?.totalBookings ? Math.round(((stats.cancelledBookings || 0) / stats.totalBookings) * 100) : 0}%
               </p>
             </div>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <div>
-              <p style={{ margin: 0, opacity: 0.8, fontSize: '12px' }}>Chi nhánh/nhà hàng</p>
-              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600 }}>
+              <p style={{ margin: 0, color: 'rgba(0, 0, 0, 0.65)', fontSize: '12px' }}>Chi nhánh/nhà hàng</p>
+              <p style={{ margin: '8px 0 0 0', fontSize: '20px', fontWeight: 600, color: '#D4663A' }}>
                 {branches?.length && restaurants?.length
                   ? (branches.length / restaurants.length).toFixed(1)
                   : 0}
