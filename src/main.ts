@@ -22,6 +22,8 @@ async function bootstrap() {
     whitelist: true,
     forbidNonWhitelisted: true,
     transform: true,
+    forbidUnknownValues: false,
+    skipMissingProperties: false,
   }));
 
   // Swagger configuration

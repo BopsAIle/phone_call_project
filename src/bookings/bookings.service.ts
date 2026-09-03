@@ -247,6 +247,10 @@ export class BookingsService {
       
       updateData.status = newStatus;
     }
+
+    if (updateBookingDto.shipper_status !== undefined) {
+      updateData.shipper_status = updateBookingDto.shipper_status;
+    }
     
     return await this.bookingRepository.update(id, updateData);
   }
@@ -375,6 +379,11 @@ export class BookingsService {
       status: BookingStatus.PENDING,
     };
 
+    return await this.bookingRepository.create(bookingData);
+  }
+
+  async createFromDto(bookingData: Partial<Booking>): Promise<Booking> {
+    // Direct creation for internal use (e.g., from MenuService)
     return await this.bookingRepository.create(bookingData);
   }
 }

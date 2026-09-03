@@ -13,6 +13,7 @@ import { DatabaseConfigService } from './config/database.config';
 import { RestaurantsModule } from './restaurants/restaurants.module';
 import { BranchesModule } from './branches/branches.module';
 import { BookingsModule } from './bookings/bookings.module';
+import { MenuModule } from './menu/menu.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { BookingsModule } from './bookings/bookings.module';
     RestaurantsModule,
     BranchesModule,
     BookingsModule,
+    MenuModule,
   ],
   controllers: [AppController],
   providers: [

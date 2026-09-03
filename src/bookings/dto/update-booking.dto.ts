@@ -10,7 +10,7 @@ import {
   Max,
   IsDateString
 } from 'class-validator';
-import { BookingSource, BookingStatus } from '../entities/booking.entity';
+import { BookingSource, BookingStatus, ShipperStatus } from '../entities/booking.entity';
 
 export class UpdateBookingDto {
   @ApiPropertyOptional({
@@ -87,4 +87,13 @@ export class UpdateBookingDto {
   @IsOptional()
   @IsEnum(BookingStatus, { message: 'Trạng thái đặt bàn không hợp lệ' })
   status?: BookingStatus;
+
+  @ApiPropertyOptional({
+    description: 'Trạng thái shipper (chỉ dùng cho DELIVERY)',
+    example: ShipperStatus.ON_THE_WAY,
+    enum: ShipperStatus,
+  })
+  @IsOptional()
+  @IsEnum(ShipperStatus, { message: 'Trạng thái shipper không hợp lệ' })
+  shipper_status?: ShipperStatus;
 }
