@@ -19,6 +19,11 @@ class Settings(BaseModel):
     ai_bridge_port: int = 8080
     log_level: str = "INFO"
     tts_chunk_bytes: int = Field(default=4096, ge=2)
+    # Restaurant server that receives booking / delivery requests for staff to
+    # act on. Empty URL means the bridge runs against an in-memory stub.
+    store_api_url: str = ""
+    store_api_token: str = ""
+    store_api_timeout: float = Field(default=5.0, gt=0)
 
 
 def load_settings() -> Settings:
@@ -33,4 +38,7 @@ def load_settings() -> Settings:
         ai_bridge_host=os.getenv("AI_BRIDGE_HOST", "0.0.0.0"),
         ai_bridge_port=int(os.getenv("AI_BRIDGE_PORT", "8080")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        store_api_url=os.getenv("STORE_API_URL", ""),
+        store_api_token=os.getenv("STORE_API_TOKEN", ""),
+        store_api_timeout=float(os.getenv("STORE_API_TIMEOUT", "5.0")),
     )

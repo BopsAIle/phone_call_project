@@ -9,10 +9,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
+from agents.registry import build_registry
 from bridge.session import CallPipeline
 from config import Settings, load_settings
 from llm.stream import OpenAiLlm
 from stt.realtime import RealtimeTranscriptionClient
+from tools.store_api import HttpStoreApi, StubStoreApi
 from tts.openai_tts import OpenAiTts
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ def create_app(
     llm: Any = None,
     tts: Any = None,
     openai_client: Any = None,
+    store_api: Any = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     if not settings.ai_bridge_token:
@@ -74,6 +77,20 @@ def create_app(
     app.state.llm = llm
     app.state.tts = tts # tts: 1 client tts được tạo ra từ openai_client
 
+    if store_api is None:
+        if settings.store_api_url:
+            store_api = HttpStoreApi(
+                settings.store_api_url,
+                settings.store_api_token,
+                timeout=settings.store_api_timeout,
+            )
+        else:
+            logger.error("STORE_API_URL is empty; booking requests will be filed nowhere")
+            store_api = StubStoreApi()
+    # One registry for the process: tools are stateless, per-call state lives on
+    # the session the ToolContext carries.
+    app.state.tools = build_registry(store_api)
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -87,7 +104,9 @@ def create_app(
             return
         await websocket.accept()
         stt = app.state.stt_factory()
-        pipeline = CallPipeline(websocket, stt=stt, llm=app.state.llm, tts=app.state.tts)
+        pipeline = CallPipeline(
+            websocket, stt=stt, llm=app.state.llm, tts=app.state.tts, tools=app.state.tools
+        )
         try:
             await pipeline.run()
         except WebSocketDisconnect:

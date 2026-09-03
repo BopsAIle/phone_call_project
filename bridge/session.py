@@ -5,18 +5,34 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from agents.registry import DEFAULT_AGENT, build_registry, resolve_agent
 from audio.resample import BRIDGE_RATE, OPENAI_RATE, StreamResampler, even_pcm16
-from llm.stream import build_system_prompt, fallback_phrase
+from llm.stream import (
+    SpeakSentence,
+    ToolCallRequest,
+    build_system_prompt,
+    fallback_phrase,
+    thinking_phrase,
+)
+from tools import ToolContext, ToolExecutor, ToolRegistry, assistant_tool_message
+from tools.slots import BookingSlots, DeliverySlots
 from turn.barge_in import OutboundGate, abort_and_interrupt
 
 logger = logging.getLogger(__name__)
 
 # ~2 s of 24 kHz PCM16 if STT is still connecting
 _MAX_PENDING_STT_BYTES = BRIDGE_RATE * 2 * 3  # 16k→24k ≈ 3/2, times 2 bytes, ~2 s
+
+# Tool → model → tool rounds allowed in one turn before we give up and speak.
+MAX_TOOL_ROUNDS = 3
+
+# How long a hangup waits for an already-dispatched write to reach the server.
+WRITE_DRAIN_SECONDS = 10.0
 
 
 class CallState(str, Enum):
@@ -40,17 +56,39 @@ class CallSession:
     locale: str = "en"
     greeting: str = ""
     inited: bool = False
-    history: list[dict[str, str]] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
     spoken_this_turn: str = ""
     closed: bool = False
+    # Everything below survives barge-in: it is business state, not audio state.
+    # A caller who interrupts mid-booking has not lost their date.
+    active_agent: str = DEFAULT_AGENT
+    booking: BookingSlots = field(default_factory=BookingSlots)
+    delivery: DeliverySlots = field(default_factory=DeliverySlots)
+    #: Fingerprint of the slot values the caller confirmed. None until they do.
+    details_fingerprint: Optional[str] = None
+    #: Fingerprints already filed, so one request cannot be sent twice.
+    consumed_fingerprints: set[str] = field(default_factory=set)
+    turn_started_at: float = 0.0
+    first_audio_logged: bool = False
 
     def begin_generation(self) -> int:
         self.generation_id += 1
         self.spoken_this_turn = ""
+        self.turn_started_at = time.monotonic()
+        self.first_audio_logged = False
         return self.generation_id
 
     def mark_audio_sent(self) -> None:
         self.playing = True
+        if not self.first_audio_logged and self.turn_started_at:
+            # The LLM+TTS half of the contract's §8 budget: the part this process
+            # controls. VAD and STT latency happen before we are called at all.
+            self.first_audio_logged = True
+            logger.info(
+                "turn.first_audio ms=%d %s",
+                int((time.monotonic() - self.turn_started_at) * 1000),
+                self.tag,
+            )
         if self.state == CallState.THINKING:
             self.state = CallState.SPEAKING
 
@@ -63,13 +101,23 @@ class CallSession:
         else:
             self.spoken_this_turn = sentence
 
-    def commit_partial_assistant(self) -> None:
+    def take_spoken(self) -> str:
+        """Read and clear the audio that actually reached the caller this turn."""
         text = self.spoken_this_turn.strip()
         self.spoken_this_turn = ""
+        return text
+
+    def commit_partial_assistant(self) -> None:
+        text = self.take_spoken()
         if not text:
             return
         last = self.history[-1] if self.history else None
-        if last and last.get("role") == "assistant" and last.get("content") == text:
+        if (
+            last
+            and last.get("role") == "assistant"
+            and not last.get("tool_calls")
+            and last.get("content") == text
+        ):
             return
         self.history.append({"role": "assistant", "content": text})
 
@@ -80,22 +128,26 @@ class CallSession:
         self.locale = str(payload.get("locale") or "en")
         self.greeting = str(payload.get("greeting") or "")
         self.inited = True
-        self.history = [
-            {
-                "role": "system",
-                "content": build_system_prompt(
-                    store_name=self.store_name,
-                    timezone=self.timezone,
-                    locale=self.locale,
-                ),
-            }
-        ]
+        self.history = [{"role": "system", "content": system_prompt_for(self)}]
         if self.greeting.strip():
             self.history.append({"role": "assistant", "content": self.greeting})
 
     @property
     def tag(self) -> str:
-        return f"callId={self.call_id or '-'} gen={self.generation_id} state={self.state}"
+        return (
+            f"callId={self.call_id or '-'} gen={self.generation_id} "
+            f"state={self.state} agent={self.active_agent}"
+        )
+
+
+def system_prompt_for(session: CallSession) -> str:
+    """Base prompt plus the active agent's fragment."""
+    return build_system_prompt(
+        store_name=session.store_name,
+        timezone=session.timezone,
+        locale=session.locale,
+        agent_prompt=resolve_agent(session.active_agent).prompt_fragment,
+    )
 
 
 class TurnPlayer:
@@ -200,11 +252,14 @@ class CallPipeline:
         stt: Any,
         llm: Any,
         tts: Any,
+        tools: Optional[ToolRegistry] = None,
     ) -> None:
         self.websocket = websocket
         self.stt = stt
         self.llm = llm
         self.tts = tts
+        self.tools = tools if tools is not None else build_registry()
+        self.executor = ToolExecutor(self.tools)
         self.session = CallSession()
         self.outbound = OutboundGate(websocket, self.session)
         self._upsampler = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
@@ -215,6 +270,12 @@ class CallPipeline:
         self._work_task: Optional[asyncio.Task[None]] = None
         self._turn_lock = asyncio.Lock()
         self._stt_start_task: Optional[asyncio.Task[None]] = None
+        self._pending_writes: set[asyncio.Task[Any]] = set()
+
+    def _track_write(self, task: asyncio.Task[Any]) -> None:
+        """Keep a dispatched side effect alive past the turn that started it."""
+        self._pending_writes.add(task)
+        task.add_done_callback(self._pending_writes.discard)
 
     async def run(self) -> None:
         # asyncio.create_task() tạo ra 1 task mới.
@@ -380,12 +441,7 @@ class CallPipeline:
         self.session.begin_generation()
         self.session.state = CallState.THINKING
         if not self.session.history:
-            self.session.history = [
-                {
-                    "role": "system",
-                    "content": build_system_prompt(store_name="", timezone="UTC", locale=self.session.locale),
-                }
-            ]
+            self.session.history = [{"role": "system", "content": system_prompt_for(self.session)}]
         player = TurnPlayer(self.session, self.outbound, self.tts, self.session.locale)
         self._player = player
         gen = player.generation_id
@@ -396,13 +452,8 @@ class CallPipeline:
                 await player.finish()
                 return
             self.session.history.append({"role": "user", "content": text})
-            async for sentence in self.llm.stream_sentences(
-                self.session.history,
-                lambda: self.session.generation_id != gen or self.session.closed,
-            ):
-                if self.session.generation_id != gen:
-                    return
-                await player.speak_sentence(sentence)
+            if not await self._run_tool_loop(player, gen):
+                return
             await player.finish()
         except asyncio.CancelledError:
             await player.abort()
@@ -422,6 +473,73 @@ class CallPipeline:
         finally:
             if self._player is player:
                 self._player = None
+
+    def _sync_system_prompt(self) -> None:
+        """Point history[0] at the active agent's prompt."""
+        message = {"role": "system", "content": system_prompt_for(self.session)}
+        if self.session.history and self.session.history[0].get("role") == "system":
+            self.session.history[0] = message
+        else:
+            self.session.history.insert(0, message)
+
+    async def _run_tool_loop(self, player: TurnPlayer, gen: int) -> bool:
+        """Stream → run tools → stream again, until the model answers without a tool.
+
+        Returns False when the turn went stale (barge-in or hangup) and the caller
+        should drop it without finishing playback.
+        """
+
+        def should_abort() -> bool:
+            return self.session.generation_id != gen or self.session.closed
+
+        ctx = ToolContext(
+            session=self.session,
+            generation_id=gen,
+            should_abort=should_abort,
+            register_write=self._track_write,
+        )
+        for _ in range(MAX_TOOL_ROUNDS):
+            # A handoff in the previous round changes both of these.
+            self._sync_system_prompt()
+            agent = resolve_agent(self.session.active_agent)
+            said_something = False
+            pending: list[ToolCallRequest] = []
+            async for event in self.llm.stream_sentences(
+                self.session.history,
+                should_abort,
+                tools=self.tools.schemas(agent.tool_selection()),
+            ):
+                if should_abort():
+                    return False
+                if isinstance(event, ToolCallRequest):
+                    pending.append(event)
+                    continue
+                said_something = True
+                await player.speak_sentence(event.text)
+            if should_abort():
+                return False
+            if not pending:
+                return True
+
+            # Attach the tool calls to whatever audio actually reached the caller,
+            # so finish() does not commit that text a second time.
+            self.session.history.append(assistant_tool_message(self.session.take_spoken(), pending))
+            bridged = False
+            for request in pending:
+                if should_abort():
+                    return False
+                tool = self.tools.get(request.name)
+                if tool is not None and tool.slow and not said_something and not bridged:
+                    await player.speak_sentence(thinking_phrase(self.session.locale))
+                    bridged = True
+                result = await self.executor.execute(request, ctx)
+                if should_abort():
+                    return False  # I1: a superseded turn writes nothing
+                self.session.history.append(self.executor.message_for(request, result))
+
+        logger.error("Tool rounds exhausted; answering with the fallback %s", self.session.tag)
+        await player.speak_sentence(fallback_phrase(self.session.locale))
+        return True
 
     def _spawn(self, coro: Any) -> None:
         previous = self._work_task
@@ -462,6 +580,14 @@ class CallPipeline:
                 await self._work_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # The caller confirmed these before hanging up, so let them land.
+        if self._pending_writes:
+            logger.info(
+                "Draining %d dispatched write(s) after hangup %s",
+                len(self._pending_writes),
+                self.session.tag,
+            )
+            await asyncio.wait(set(self._pending_writes), timeout=WRITE_DRAIN_SECONDS)
         if self._stt_start_task is not None and not self._stt_start_task.done():
             self._stt_start_task.cancel()
             try:

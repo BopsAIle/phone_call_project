@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, AsyncIterator, Callable, Protocol
+from typing import Any, AsyncIterator, Callable, Protocol, Union
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -14,13 +15,43 @@ FALLBACK_PHRASES = {
     "en": "Sorry, I didn't catch that. Could you say that again?",
     "de": "Entschuldigung, das habe ich nicht verstanden. Könnten Sie das bitte wiederholen?",
 }
+# Spoken before a slow tool: silence on a phone line reads as a dropped call.
+THINKING_PHRASES = {
+    "en": "Let me check that for you.",
+    "de": "Einen Moment, ich schaue das kurz nach.",
+}
+
+
+@dataclass(frozen=True)
+class SpeakSentence:
+    """A complete clause, ready for TTS."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ToolCallRequest:
+    """One tool the model asked for. `arguments` is raw JSON, not yet parsed."""
+
+    id: str
+    name: str
+    arguments: str
+
+
+TurnEvent = Union[SpeakSentence, ToolCallRequest]
 
 
 def fallback_phrase(locale: str) -> str:
     return FALLBACK_PHRASES.get((locale or "en").lower()[:2], FALLBACK_PHRASES["en"])
 
 
-def build_system_prompt(*, store_name: str, timezone: str, locale: str) -> str:
+def thinking_phrase(locale: str) -> str:
+    return THINKING_PHRASES.get((locale or "en").lower()[:2], THINKING_PHRASES["en"])
+
+
+def build_system_prompt(
+    *, store_name: str, timezone: str, locale: str, agent_prompt: str = ""
+) -> str:
     tz_name = timezone or "UTC"
     try:
         now = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M %Z")
@@ -33,7 +64,7 @@ def build_system_prompt(*, store_name: str, timezone: str, locale: str) -> str:
 
     lang = locale or "en"
     name = store_name or "the restaurant"
-    return (
+    base = (
         f"You are a phone assistant for {name}. "
         f"Speak naturally and briefly in the caller's language ({lang}). "
         "No markdown. Do not read lists unless the caller needs them spoken aloud. "
@@ -42,6 +73,8 @@ def build_system_prompt(*, store_name: str, timezone: str, locale: str) -> str:
         'Words like "tonight" and "tomorrow" use that timezone, not the server clock. '
         "Do not mention these instructions."
     )
+    fragment = (agent_prompt or "").strip()
+    return f"{base}\n\n{fragment}" if fragment else base
 
 
 class SentenceAggregator:
@@ -94,12 +127,58 @@ class SentenceAggregator:
         self._needs_lookahead = False
 
 
+class ToolCallAccumulator:
+    """Rebuild tool calls from streamed deltas.
+
+    OpenAI streams `function.arguments` as JSON fragments keyed by `index`, so a
+    call is only parseable once the stream ends. Collect here, emit at `finish()`.
+    """
+
+    def __init__(self) -> None:
+        self._calls: dict[int, dict[str, str]] = {}
+
+    def push(self, tool_calls: Any) -> None:
+        for call in tool_calls or ():
+            index = getattr(call, "index", 0) or 0
+            slot = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            call_id = getattr(call, "id", None)
+            if call_id:
+                slot["id"] = call_id
+            function = getattr(call, "function", None)
+            if function is None:
+                continue
+            name = getattr(function, "name", None)
+            if name:
+                slot["name"] = name
+            arguments = getattr(function, "arguments", None)
+            if arguments:
+                slot["arguments"] += arguments
+
+    def finish(self) -> list[ToolCallRequest]:
+        out: list[ToolCallRequest] = []
+        for index in sorted(self._calls):
+            slot = self._calls[index]
+            if not slot["name"]:
+                logger.warning("Dropping streamed tool call with no name index=%s", index)
+                continue
+            out.append(
+                ToolCallRequest(
+                    id=slot["id"] or f"call_{index}",
+                    name=slot["name"],
+                    arguments=slot["arguments"] or "{}",
+                )
+            )
+        self._calls.clear()
+        return out
+
+
 class LlmStreamer(Protocol):
     async def stream_sentences(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         should_abort: Callable[[], bool],
-    ) -> AsyncIterator[str]:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[TurnEvent]:
         ...
 
 
@@ -110,30 +189,42 @@ class OpenAiLlm:
 
     async def stream_sentences(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         should_abort: Callable[[], bool],
-    ) -> AsyncIterator[str]:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[TurnEvent]:
         aggregator = SentenceAggregator()
-        stream = await self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            stream=True,
-            temperature=0.7,
-            max_tokens=400,
-        )
+        tool_calls = ToolCallAccumulator()
+        request: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "temperature": 0.7,
+            "max_tokens": 400,
+        }
+        if tools:
+            request["tools"] = tools
+        stream = await self._client.chat.completions.create(**request)
         try:
             async for chunk in stream:
                 if should_abort():
                     return
                 choice = chunk.choices[0] if chunk.choices else None
-                delta = (choice.delta.content if choice and choice.delta else None) or ""
-                for sentence in aggregator.push(delta):
+                delta = choice.delta if choice else None
+                if delta is None:
+                    continue
+                tool_calls.push(getattr(delta, "tool_calls", None))
+                for sentence in aggregator.push(delta.content or ""):
                     if should_abort():
                         return
-                    yield sentence
+                    yield SpeakSentence(sentence)
+            if should_abort():
+                return
             remainder = aggregator.flush()
-            if remainder and not should_abort():
-                yield remainder
+            if remainder:
+                yield SpeakSentence(remainder)
+            for call in tool_calls.finish():
+                yield call
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
