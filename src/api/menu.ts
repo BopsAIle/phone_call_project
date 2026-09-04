@@ -1,7 +1,6 @@
 import { axiosInstance } from './axios'
 import {
   MenuItem,
-  MenuItemStatus,
   CreateMenuItemDto,
   UpdateMenuItemDto,
   CreateTakeoutBookingDto,
