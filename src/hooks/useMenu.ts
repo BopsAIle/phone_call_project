@@ -38,7 +38,7 @@ export const useCreateMenuItem = () => {
 
   return useMutation({
     mutationFn: (data: CreateMenuItemDto) => menuApi.createMenuItem(data),
-    onSuccess: (data) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['menu-items'] })
     },
   })
