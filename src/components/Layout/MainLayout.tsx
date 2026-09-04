@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Layout, Menu, MenuProps, theme } from 'antd'
-import { HomeOutlined, ShopOutlined, BranchesOutlined, CalendarOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
+import { HomeOutlined, ShopOutlined, BranchesOutlined, CalendarOutlined, UnorderedListOutlined, ShoppingCartOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { APP_NAME } from '../../utils/constants'
 
@@ -18,13 +18,23 @@ const items: MenuItem[] = [
   },
   {
     key: '/restaurants',
-    icon: <ShopOutlined style={{ fontSize: '16px' }} />,
+    icon: <ShopOutlined style={{ fontSize: '16px' }} />,  
     label: 'Nhà hàng',
   },
   {
     key: '/branches',
     icon: <BranchesOutlined style={{ fontSize: '16px' }} />,
     label: 'Chi nhánh',
+  },
+  {
+    key: '/menu',
+    icon: <UnorderedListOutlined style={{ fontSize: '16px' }} />,
+    label: 'Thực đơn',
+  },
+  {
+    key: '/orders',
+    icon: <ShoppingCartOutlined style={{ fontSize: '16px' }} />,
+    label: 'Đơn hàng',
   },
   {
     key: '/bookings',

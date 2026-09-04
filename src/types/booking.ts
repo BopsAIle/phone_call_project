@@ -1,3 +1,5 @@
+import { BookingType, ShipperStatus } from './menu'
+
 export enum BookingStatus {
   PENDING = 'pending',
   CONFIRMED = 'confirmed',
@@ -47,9 +49,17 @@ export interface Booking {
   party_size: number
   booking_date: string
   booking_time: string
+  booking_type?: BookingType
   note: string
   status: BookingStatus
   source: BookingSource
+  total_price?: number
+  delivery_address?: string
+  delivery_phone?: string
+  delivery_fee?: number
+  estimated_delivery_time?: string
+  actual_delivery_time?: string
+  shipper_status?: ShipperStatus
   created_at: string
   updated_at: string
   restaurant?: BookingRestaurant

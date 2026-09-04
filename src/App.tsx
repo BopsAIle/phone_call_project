@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from '@tanstack/react-query'
 import { ConfigProvider } from 'antd'
 import viVN from 'antd/locale/vi_VN'
 import { MainLayout } from './components'
-import { Dashboard, RestaurantsPage, BranchesPage, BookingsPage } from './pages'
+import { Dashboard, RestaurantsPage, BranchesPage, BookingsPage, MenuPage, OrdersPage } from './pages'
 
 const queryClient = new QueryClient()
 
@@ -79,6 +79,8 @@ const App: React.FC = () => {
               <Route path="/restaurants" element={<RestaurantsPage />} />
               <Route path="/branches" element={<BranchesPage />} />
               <Route path="/bookings" element={<BookingsPage />} />
+              <Route path="/menu" element={<MenuPage />} />
+              <Route path="/orders" element={<OrdersPage />} />
             </Routes>
           </MainLayout>
         </Router>
