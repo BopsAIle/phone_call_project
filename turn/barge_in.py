@@ -1,5 +1,6 @@
 """Barge-in: abort stale LLM/TTS and send `interrupt` after the last sent audio frame."""
-
+## file này dùng cho trường hợp user ngắt giọng AI nói
+## thì ta sẽ gửi request yêu cầu ngắt giọng AI
 from __future__ import annotations
 
 import asyncio
@@ -58,6 +59,13 @@ class OutboundGate:
     async def send_interrupt(self) -> None:
         async with self.lock:
             await self._send_interrupt_locked()
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        async with self.lock:
+            if self.session.closed:
+                return
+            await self.websocket.send_text(text)
 
     async def _send_interrupt_locked(self) -> None:
         if self.session.closed:

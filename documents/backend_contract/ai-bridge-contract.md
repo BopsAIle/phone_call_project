@@ -141,9 +141,11 @@ Gửi một lần, ngay sau khi socket mở.
   "event": "session.init",
   "callId": "clx8k2p9v0000abcd1234efgh",
   "storeName": "Bella Vista",
+  "toNumber": "+49301234567",
   "timezone": "Europe/Berlin",
   "locale": "en",
-  "greeting": "Thanks for calling Bella Vista. This is an automated assistant — how can I help you today?"
+  "greeting": "Thanks for calling Bella Vista. This is an automated assistant — how can I help you today?",
+  "resumed": false
 }
 ```
 
@@ -151,9 +153,11 @@ Gửi một lần, ngay sau khi socket mở.
 |---|---|---|
 | `callId` | string | Id cuộc gọi nội bộ của chúng tôi. Dùng khớp log; đây là khóa đối chiếu được. |
 | `storeName` | string | Tên nhà hàng, đưa vào prompt. |
+| `toNumber` | string | Số bị gọi — Twilio `To`, E.164. Team AI chuẩn hóa còn chữ số rồi `GET /restaurants/by-hotline/{digits}`. Thiếu field hoặc tra không ra thì agent không bịa chi nhánh. |
 | `timezone` | string | Vùng IANA, ví dụ `Europe/Berlin`. Cần để “tối nay” và “ngày mai” tính theo đồng hồ cửa hàng, không theo server. |
-| `locale` | `"en"` \| `"de"` | Ngôn ngữ cuộc gọi này. |
+| `locale` | `"en"` \| `"de"` \| `"vi"` | Ngôn ngữ cuộc gọi này. Backend Việt Nam gửi `"vi"`. |
 | `greeting` | string | Đúng text nói đầu tiên. Cấu hình theo cửa hàng; không diễn lại — câu này mang disclosure trợ lý tự động bắt buộc pháp lý. |
+| `resumed` | boolean | Backend gửi `false` lần đầu, `true` khi reconnect. **v1 bỏ qua** — reconnect vẫn chào lại. |
 
 #### Audio (frame binary)
 
@@ -176,10 +180,37 @@ sinh ra; không pace, không pad.
 Gửi khi VAD của bạn phát hiện người gọi nói trong lúc đang phát câu trả
 lời. Yêu cầu ở [§6](#6-team-ai-phải-đảm-bảo).
 
-**Team AI: v1 không cần control message khác.** Wire chỉ audio cộng
-`interrupt`. Không thêm `response.start` / `response.end` hay `transcript`
-ở v1. Đặt bàn và chuyển lễ tân ở ngoài socket này đến khi đổi hợp đồng
-sau (xem [§10](#10-câu-hỏi-mở)).
+**Team AI:** ngoài `interrupt`, gửi thêm `order.created` khi tạo đơn món thành
+công (xem dưới). Không thêm `response.start` / `response.end` hay `transcript`
+ở v1. Đặt bàn vẫn chạy in-process phía AI. Chuyển lễ tân vẫn ngoài hợp đồng
+(xem [§10](#10-câu-hỏi-mở)).
+
+#### `order.created` (frame text)
+
+Gửi **một lần** ngay sau khi `POST /menu/delivery/ai` hoặc
+`POST /menu/takeout/ai` trả 2xx. Không gửi khi API lỗi, khi thiếu field,
+hay khi tool trả `already_created`. Backend điện thoại có thể bỏ qua.
+Frontend demo dùng event này để hiện “Đã đặt hàng thành công”.
+
+```json
+{
+  "event": "order.created",
+  "callId": "clx8k2p9v0000abcd1234efgh",
+  "fulfillment": "delivery",
+  "message": "Đã đặt hàng thành công",
+  "orderId": "ord-1",
+  "customerName": "Nguyễn Văn A",
+  "phoneNumber": "0901234567",
+  "branchName": "Chi nhánh Minh Khai",
+  "bookingDate": "2026-09-04",
+  "bookingTime": "18:30",
+  "deliveryAddress": "12 Nguyễn Trãi",
+  "deliveryPhone": "0901234567",
+  "cart": [{ "name": "Phở bò", "quantity": 2, "unit": "tô" }],
+  "total": 110000,
+  "payment": "cod"
+}
+```
 
 ---
 
@@ -388,7 +419,7 @@ ack các mục sở hữu chung. Spec process AI:
 | 4 | Batch input ~100 ms có chấp nhận được, khi nó nằm trước VAD của bạn? (§5) | Team AI | **Đề xuất** | **Có.** VAD là OpenAI `server_vad` phía AI. 100 ms thêm tối đa ~100 ms vào barge-in. Giữ frame 3.200 byte. |
 | 5 | Có cần control message thêm không? (§4) | Cả hai | **Đề xuất (v1)** | **v1: chỉ `interrupt`.** Không `response.start` / `response.end`. Không `transcript` trên wire. Event `transfer` sẽ là đổi hợp đồng sau nếu cần chuyển lễ tân. |
 | 6 | **Transcript.** Hợp đồng hiện audio-only nên backend không persist text hội thoại. Bảng `Utterance` đã đúng nhưng sẽ trống. Nếu cần transcript để review, analytics, hay tách đặt bàn, nói ngay — thêm control message `transcript` rẻ lúc này và khó về sau. | Cả hai | **Đề xuất (v1)** | AI giữ transcript **trong RAM** chỉ cho LLM. **Không** thêm control message `transcript` ở v1. Xem lại nếu review/analytics cần text phía backend. |
-| 7 | **Đặt bàn.** Hệ thống đang hướng tới tool-calling để lấy chi tiết reservation. Ai sở hữu phần đó, và booking vào database của chúng tôi thế nào? Hợp đồng này chưa phủ. | Cả hai | **Hoãn** | **Ngoài đường audio v1.** Context LLM là `session.init` (`storeName`, `timezone`, `locale`, `greeting`) cộng history trong RAM. Tool đặt bàn (`check_availability`, `create_booking`, …) là hook sau trong process AI và không đổi giao thức wire này. |
+| 7 | **Đặt bàn.** Hệ thống đang hướng tới tool-calling để lấy chi tiết reservation. Ai sở hữu phần đó, và booking vào database của chúng tôi thế nào? Hợp đồng này chưa phủ. | Team AI | **Đề xuất** | **In-process, không đổi wire.** `toNumber` trên `session.init` khóa catalog. Tool `resolve_branch` / `confirm_branch` / `create_booking` chạy trong Thinking; `POST /bookings` (`source=phone_ai`) từ process AI. Socket vẫn chỉ PCM + `interrupt`. |
 
 ---
 

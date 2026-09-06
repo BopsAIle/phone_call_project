@@ -40,4 +40,116 @@ def test_system_prompt_uses_store_and_timezone() -> None:
     assert "Bella Vista" in prompt
     assert "Europe/Berlin" in prompt
     assert "de" in prompt
-    assert "tonight" in prompt
+    assert "tối nay" in prompt
+    assert "tomorrow" in prompt
+
+
+def test_system_prompt_covers_booking_and_order_when_catalog_loaded() -> None:
+    from booking.models import Branch
+
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        branches=[Branch(id="mk", name="Minh Khai")],
+        catalog_loaded=True,
+        cart_summary="2 Phở bò",
+        fulfillment="delivery",
+        delivery_address="12 Nguyen Trai",
+    )
+    assert "create_booking" in prompt
+    assert "create_order" in prompt
+    assert "search_menu" in prompt
+    assert "list_menu" in prompt
+    assert "2 Phở bò" in prompt
+    assert "12 Nguyen Trai" in prompt
+    assert "tiền mặt khi nhận" in prompt
+    assert "Không đọc phí giao hàng" in prompt
+    assert "save_order_details" in prompt
+    assert "giờ nhận hàng" in prompt
+    assert "ngày lấy món" in prompt
+    assert "số điện thoại người nhận" in prompt
+
+
+def test_system_prompt_asks_branch_before_menu_when_unlocked() -> None:
+    from booking.models import Branch
+
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        branches=[
+            Branch(id="mk", name="Minh Khai", address="Minh Khai"),
+            Branch(id="bd", name="Ba Đình", address="Ba Đình"),
+        ],
+        catalog_loaded=True,
+    )
+    assert "Không gọi search_menu" in prompt
+    assert "hỏi trước chi nhánh" in prompt
+    assert "chỉ đọc tên" in prompt
+    assert "đọc tên và địa chỉ đang hoạt động" not in prompt
+    assert "quận 3" in prompt
+
+
+def test_system_prompt_keeps_address_for_followup_but_does_not_read_it() -> None:
+    from booking.models import Branch
+
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        branches=[
+            Branch(id="mk", name="Minh Khai", address="12 Nguyễn Trãi"),
+            Branch(id="bd", name="Ba Đình", address="56 Liễu Giai"),
+        ],
+        catalog_loaded=True,
+    )
+    assert "chỉ đọc tên" in prompt
+    assert "CẤM đọc" in prompt
+    assert "12 Nguyễn Trãi" in prompt
+    assert "56 Liễu Giai" in prompt
+    assert "chỉ tên và địa chỉ" not in prompt
+    assert "HCM" in prompt
+    assert "Hồ Chí Minh" in prompt
+    names_block, _, rest = prompt.partition("Tên chi nhánh được phép đọc")
+    assert "12 Nguyễn Trãi" not in names_block
+    speakable, _, private = rest.partition("Địa chỉ nội bộ")
+    assert "Minh Khai" in speakable
+    assert "12 Nguyễn Trãi" not in speakable
+    assert "12 Nguyễn Trãi" in private
+
+
+def test_system_prompt_asks_booking_or_takeaway_when_intent_unknown() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+    )
+    assert "bạn muốn đặt bàn hay mang về" in prompt
+    assert "Không mở đầu bằng câu hỏi lựa chọn" not in prompt
+
+
+def test_system_prompt_does_not_reask_intent_when_booking() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        intent="booking",
+        catalog_loaded=True,
+    )
+    assert "Người gọi hiện đang đặt bàn." in prompt
+    assert "nếu khách chưa nói rõ muốn gì" not in prompt
+
+
+def test_system_prompt_lists_missing_order_slots() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        catalog_loaded=True,
+        fulfillment="delivery",
+        delivery_address="12 Nguyen Trai",
+        order_status="Thông tin đơn còn thiếu: tên người đặt, số điện thoại người đặt. Hỏi tiếp: hỏi tên người đặt.",
+    )
+    assert "còn thiếu: tên người đặt" in prompt
+    assert "Hỏi tiếp: hỏi tên người đặt" in prompt

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import logging
-from datetime import UTC, datetime
-from typing import Any, AsyncIterator, Callable, Protocol
+from datetime import datetime, timezone as dt_timezone
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -12,36 +14,253 @@ logger = logging.getLogger(__name__)
 SENTENCE_ENDS = frozenset(".?!…\n")
 FALLBACK_PHRASES = {
     "en": "Sorry, I didn't catch that. Could you say that again?",
-    "de": "Entschuldigung, das habe ich nicht verstanden. Könnten Sie das bitte wiederholen?",
+    "vi": "Xin lỗi, mình chưa nghe rõ. Bạn nói lại giúp mình được không ạ?",
 }
+_MAX_TOOL_ROUNDS = 12
 
 
 def fallback_phrase(locale: str) -> str:
     return FALLBACK_PHRASES.get((locale or "en").lower()[:2], FALLBACK_PHRASES["en"])
 
 
-def build_system_prompt(*, store_name: str, timezone: str, locale: str) -> str:
+def _now_in_zone(timezone: str) -> tuple[str, str]:
     tz_name = timezone or "UTC"
     try:
         now = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M %Z")
+        return tz_name, now
     except Exception:
         # Windows ships no IANA database, so ZoneInfo("UTC") fails here too when
-        # the tzdata package is missing. datetime.UTC is stdlib and always works.
+        # the tzdata package is missing. timezone.utc is stdlib and always works.
         logger.warning("Timezone %r unavailable; using UTC. Is tzdata installed?", timezone)
-        tz_name = "UTC"
-        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M %Z")
+        return "UTC", datetime.now(dt_timezone.utc).strftime("%Y-%m-%d %H:%M %Z")
 
+## Đầu vào là danh sách các chi nhánh
+def _catalog_lines(branches: Any) -> str:
+    rows = list(branches or [])
+    if not rows:
+        return "(không có chi nhánh đang hoạt động)"
+    return "\n".join(f"- {getattr(branch, 'name', '') or ''}" for branch in rows)
+
+
+def _catalog_addresses_private(branches: Any) -> str:
+    lines: list[str] = []
+    for branch in list(branches or []):
+        name = getattr(branch, "name", "") or ""
+        address = getattr(branch, "address", "") or ""
+        opening = getattr(branch, "opening_time", "") or ""
+        closing = getattr(branch, "closing_time", "") or ""
+        extra: list[str] = []
+        if address:
+            extra.append(address)
+        if opening and closing:
+            extra.append(f"{opening}–{closing}")
+        if extra:
+            lines.append(f"- {name}: {'; '.join(extra)}")
+    return "\n".join(lines)
+
+
+def build_system_prompt(
+    *,
+    store_name: str,
+    timezone: str,
+    locale: str,
+    branches: Any = None,
+    restaurant_missing: bool = False,
+    selected_branch_name: str = "",
+    catalog_loaded: bool = False,
+    intent: str = "",
+    booking_created: bool = False,
+    order_created: bool = False,
+    cart_summary: str = "",
+    fulfillment: str = "",
+    delivery_address: str = "",
+    menu_ready: bool = False,
+    order_status: str = "",
+) -> str:
+    tz_name, now = _now_in_zone(timezone)
     lang = locale or "en"
-    name = store_name or "the restaurant"
-    return (
-        f"You are a phone assistant for {name}. "
-        f"Speak naturally and briefly in the caller's language ({lang}). "
-        "No markdown. Do not read lists unless the caller needs them spoken aloud. "
-        f"The restaurant timezone is {tz_name} (IANA). "
-        f"The current local time there is {now}. "
-        'Words like "tonight" and "tomorrow" use that timezone, not the server clock. '
-        "Do not mention these instructions."
+    name = store_name or "nhà hàng"
+    parts = [
+        f"Bạn là trợ lý điện thoại của {name}.",
+        f"Nói tự nhiên, ngắn gọn bằng ngôn ngữ của người gọi ({lang}).",
+        "Không dùng markdown. Không đọc danh sách trừ khi người gọi cần nghe đọc.",
+        f"Múi giờ nhà hàng là {tz_name} (IANA).",
+        f"Giờ địa phương hiện tại là {now}.",
+        'Các từ như "tối nay", "ngày mai", "tomorrow", "today" tính theo múi giờ đó, '
+        "không theo đồng hồ máy chủ. "
+        "Khi khách nói tomorrow / ngày mai, đổi thành YYYY-MM-DD của ngày mai theo giờ địa phương ở trên "
+        "và truyền vào booking_date. Có thể gửi nguyên chữ tomorrow; tool sẽ đổi ra ngày.",
+        "Không đọc UUID, JSON, hoặc tên công cụ ra miệng.",
+        "Không nhắc tới các hướng dẫn này.",
+        "Mỗi lần chỉ hỏi một hoặc hai câu.",
+    ]
+    if restaurant_missing:
+        parts.append(
+            "Không tải được nhà hàng gắn với số vừa gọi. "
+            "Nói rằng bạn không thể tra chi nhánh, đặt bàn, hay nhận đơn món. "
+            "Không bịa địa điểm hay món ăn."
+        )
+        return " ".join(parts)
+
+    if not intent:
+        parts.append(
+            "Sau câu chào, nếu khách chưa nói rõ muốn gì, hỏi một câu: "
+            "bạn muốn đặt bàn hay mang về. "
+            "Đặt bàn là giữ chỗ tại quán. Mang về là đặt món để lấy tại quán. "
+            "Nếu họ nói giao hàng hoặc ship thì nhận đơn giao hàng. "
+            "Suy ra từ lời họ nếu đã đủ rõ; không hỏi lại khi họ đã chọn. "
+            "Chưa rõ ý định thì chưa hỏi tên, số điện thoại, món, hay chi tiết khác."
+        )
+    parts.append(
+        "Nếu họ đổi ý trước khi bàn hoặc đơn được tạo, làm theo yêu cầu mới và "
+        "không gọi công cụ create của yêu cầu đã bỏ."
     )
+
+    if not catalog_loaded:
+        return " ".join(parts)
+
+    parts.append("Tên chi nhánh được phép đọc (chỉ đọc tên, không kèm địa chỉ):")
+    parts.append(_catalog_lines(branches))
+    private_addr = _catalog_addresses_private(branches)
+    if private_addr:
+        parts.append(
+            "Địa chỉ nội bộ — CẤM đọc khi kể tên hay hỏi khách chọn chi nhánh. "
+            "Chỉ đọc khi khách hỏi địa chỉ, vị trí, hay chi nhánh ở đâu:"
+        )
+        parts.append(private_addr)
+    if selected_branch_name:
+        parts.append(f"Chi nhánh đang chọn: {selected_branch_name}.")
+    else:
+        parts.append("Chưa chọn chi nhánh.")
+    parts.append(
+        "Khi nói về chi nhánh: chỉ đọc tên. Không đọc địa chỉ, đường phố, hay số nhà "
+        "trừ khi người gọi hỏi địa chỉ, vị trí, hay chi nhánh ở đâu. "
+        "Khi họ hỏi, đọc đúng địa chỉ trong danh mục nội bộ."
+    )
+    parts.append(
+        "HCM, TP HCM, TPHCM, Sài Gòn nghĩa là Hồ Chí Minh. "
+        "Khi khách nói HCM thì hiểu là chi nhánh mang tên HCM / Hồ Chí Minh, "
+        "không phải chi nhánh khác chỉ vì địa chỉ có chữ HCM. "
+        "Khi đọc tên có HCM thì đọc Hồ Chí Minh. Không đọc địa chỉ lúc kể tên."
+    )
+    parts.append(
+        "Khi người gọi nêu hoặc chọn chi nhánh, BẮT BUỘC gọi resolve_branch "
+        "với đúng lời họ nói (ví dụ 'tôi muốn chọn chi nhánh quận 3'). "
+        "Công cụ sẽ đưa lời đó cho model so với list chi nhánh đang có. "
+        "Không tự kết luận chi nhánh có hay không trước khi có kết quả công cụ. "
+        "Cùng một chi nhánh đã khóa dùng cho đặt bàn và làm bếp / điểm lấy món."
+    )
+    parts.append(
+        "Nếu resolve_branch trả none, nói địa điểm đó không phải của mình và "
+        "nêu tên chi nhánh thật. Nếu ambiguous hoặc độ tin cậy thấp, hỏi họ muốn chi nhánh nào "
+        "rồi gọi confirm_branch với branch_id từ công cụ."
+    )
+
+    branch_count = len(list(branches or []))
+    if not selected_branch_name:
+        if branch_count <= 1:
+            parts.append(
+                "Nhà hàng chỉ có một chi nhánh đang hoạt động. Dùng chi nhánh đó, không hỏi khách chọn."
+            )
+        else:
+            parts.append(
+                "Chưa khóa chi nhánh. Nếu người gọi muốn đặt món: hỏi trước chi nhánh nào "
+                "(một câu, chỉ đọc tên đang hoạt động, không đọc địa chỉ). "
+                "Gọi resolve_branch / confirm_branch. "
+                "Không gọi search_menu, list_menu, add_to_cart, hay create_order trước khi khóa chi nhánh."
+            )
+
+    if intent == "order":
+        parts.append("Người gọi hiện đang đặt món.")
+    elif intent == "booking":
+        parts.append("Người gọi hiện đang đặt bàn.")
+
+    if booking_created:
+        parts.append(
+            "Cuộc gọi này đã tạo đặt bàn. Không gọi create_booking nữa. "
+            "Vẫn có thể nhận đơn món nếu chưa tạo."
+        )
+    else:
+        parts.append(
+            "Đặt bàn: sau khi khớp độ tin cậy cao hoặc confirm_branch, xác nhận ngắn "
+            "tên chi nhánh, rồi thu thập tên khách, số điện thoại, số người, ngày, giờ, "
+            "và ghi chú tùy chọn."
+        )
+        parts.append(
+            "Đọc lại mọi chi tiết đặt bàn và chờ người gọi đồng ý rồi mới gọi create_booking. "
+            "restaurant_id và branch_id đã có trong bộ nhớ — không hỏi. "
+            "Sau khi người gọi xác nhận, BẮT BUỘC gọi create_booking trong lượt đó. "
+            "Không nói bàn đã đặt, đã giữ, hay đã xác nhận trừ khi create_booking "
+            "trả về ok true. Nếu thất bại, nói thật và không nhận thành công."
+        )
+
+    if order_created:
+        parts.append(
+            "Cuộc gọi này đã tạo đơn món. Không gọi create_order nữa. "
+            "Vẫn có thể nhận đặt bàn nếu chưa tạo."
+        )
+    else:
+        parts.append(
+            "Đặt món (giao hàng hoặc mang về): không đọc hết thực đơn. Không đọc phí giao hàng "
+            "hay UUID. Khi khách hỏi thực đơn, có món gì, những món nào: nếu chưa khóa chi nhánh "
+            "thì gọi resolve_branch trước, rồi list_menu. list_menu GET menu của chi nhánh đã khóa. "
+            "Đọc vài tên món, hỏi họ muốn món nào; không đọc hết nếu nhiều; không đọc địa chỉ chi nhánh. "
+            "Nếu câu vừa nêu chi nhánh vừa hỏi món cụ thể: resolve_branch rồi search_menu chỉ với tên món. "
+            "Khi người gọi nêu tên món và chi nhánh đã khóa, BẮT BUỘC gọi search_menu "
+            "với đúng tên món trước khi khẳng định món đó có. Không bịa món."
+        )
+        parts.append(
+            "Nếu search_menu trả none, nói không có món đó và nêu tên gần nếu công cụ "
+            "liệt kê candidates. Nếu ambiguous hoặc độ tin cậy thấp, hỏi họ muốn món nào. "
+            "search_menu hoặc list_menu trả no_branch thì hỏi chi nhánh rồi resolve_branch / confirm_branch, "
+            "không bịa menu. Sau khi khớp rõ, gọi add_to_cart với menu_item_id từ công cụ, "
+            "số lượng, và ghi chú dòng tùy chọn."
+        )
+        parts.append(
+            "Hỏi họ có muốn thêm gì không. Dùng update_cart hoặc remove_from_cart nếu họ "
+            "đổi món. Thu thập đủ thông tin theo hình thức nhận, mỗi lượt hỏi một mục còn thiếu, "
+            "không bịa field. Hỏi theo thứ tự: thêm món xong → giao hàng hay mang về → "
+            "(nếu giao: địa chỉ, rồi số điện thoại người nhận nếu khác số đặt) → "
+            "tên người đặt → số điện thoại người đặt → ngày → giờ → ghi chú nếu có. "
+            "Bỏ qua mục đã có. Mỗi khi khách nêu tên, SĐT, ngày, giờ, ghi chú, hoặc SĐT nhận: "
+            "gọi save_order_details ngay."
+        )
+        parts.append(
+            "Giao hàng: gọi set_fulfillment với delivery và địa chỉ nói miệng (bắt buộc). "
+            "Thu tên người đặt, số điện thoại người đặt, ngày giao (YYYY-MM-DD theo múi giờ "
+            "nhà hàng), giờ nhận hàng (HH:MM). Hỏi số điện thoại người nhận nếu khác số đặt; "
+            "không khác thì dùng cùng số. Ghi chú món tùy chọn. Không hỏi phí ship."
+        )
+        parts.append(
+            "Mang về: gọi set_fulfillment với pickup (không hỏi địa chỉ nhà). "
+            "Thu tên người đặt, số điện thoại, ngày lấy món, giờ lấy món. Ghi chú tùy chọn."
+        )
+        parts.append(
+            "Thanh toán tiền mặt khi nhận hàng hoặc khi đến lấy; không hỏi số thẻ. "
+            "Đọc lại món, số lượng, tổng tiền nếu có giá, tên, SĐT, ngày giờ, và địa chỉ giao "
+            "hoặc việc họ đến lấy tại chi nhánh (kèm SĐT nhận nếu khác). Chờ đồng ý rồi mới "
+            "create_order với customer_name, phone_number, booking_date, booking_time. "
+            "Sau khi họ xác nhận, BẮT BUỘC gọi create_order trong lượt đó. "
+            "Không nói đơn đã đặt trừ khi create_order trả về ok true. "
+            "Nếu missing_fields, hỏi đúng mục còn thiếu bằng lời thường, không đọc tên field. "
+            "Nếu thất bại, nói thật và không nhận thành công."
+        )
+        if menu_ready:
+            parts.append("Thực đơn đã nạp trong bộ nhớ; vẫn dùng search_menu hoặc list_menu, không đọc hết.")
+        if cart_summary:
+            parts.append(f"Giỏ hàng hiện tại: {cart_summary}.")
+        else:
+            parts.append("Giỏ hàng đang trống.")
+        if fulfillment == "delivery" and delivery_address:
+            parts.append(f"Hình thức: giao tới {delivery_address}.")
+        elif fulfillment == "pickup":
+            parts.append("Hình thức: đến lấy tại chi nhánh đã chọn.")
+        else:
+            parts.append("Chưa chọn hình thức giao hoặc nhận.")
+        if order_status:
+            parts.append(order_status)
+
+    return " ".join(parts)
 
 
 class SentenceAggregator:
@@ -97,10 +316,41 @@ class SentenceAggregator:
 class LlmStreamer(Protocol):
     async def stream_sentences(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         should_abort: Callable[[], bool],
+        *,
+        tools: Optional[list[dict[str, Any]]] = None,
+        execute_tool: Optional[Callable[[str, str], Awaitable[str] | str]] = None,
     ) -> AsyncIterator[str]:
         ...
+
+
+def _accumulate_tool_call(bucket: dict[int, dict[str, str]], part: Any) -> None:
+    index = getattr(part, "index", 0) or 0
+    slot = bucket.setdefault(index, {"id": "", "name": "", "arguments": ""})
+    call_id = getattr(part, "id", None)
+    if call_id:
+        slot["id"] = str(call_id)
+    function = getattr(part, "function", None)
+    if function is None:
+        return
+    name = getattr(function, "name", None)
+    if name:
+        slot["name"] = str(name)
+    arguments = getattr(function, "arguments", None)
+    if arguments:
+        slot["arguments"] += str(arguments)
+
+
+async def _run_tool(
+    execute_tool: Callable[[str, str], Awaitable[str] | str],
+    name: str,
+    arguments: str,
+) -> str:
+    result = execute_tool(name, arguments)
+    if inspect.isawaitable(result):
+        result = await result
+    return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
 class OpenAiLlm:
@@ -110,31 +360,87 @@ class OpenAiLlm:
 
     async def stream_sentences(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         should_abort: Callable[[], bool],
+        *,
+        tools: Optional[list[dict[str, Any]]] = None,
+        execute_tool: Optional[Callable[[str, str], Awaitable[str] | str]] = None,
     ) -> AsyncIterator[str]:
-        aggregator = SentenceAggregator()
-        stream = await self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            stream=True,
-            temperature=0.7,
-            max_tokens=400,
-        )
-        try:
-            async for chunk in stream:
-                if should_abort():
-                    return
-                choice = chunk.choices[0] if chunk.choices else None
-                delta = (choice.delta.content if choice and choice.delta else None) or ""
-                for sentence in aggregator.push(delta):
+        for _round in range(_MAX_TOOL_ROUNDS):
+            if should_abort():
+                return
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "stream": True,
+                "temperature": 0.7,
+                "max_tokens": 400,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+            stream = await self._client.chat.completions.create(**kwargs)
+            aggregator = SentenceAggregator()
+            tool_calls: dict[int, dict[str, str]] = {}
+            try:
+                async for chunk in stream:
                     if should_abort():
                         return
-                    yield sentence
-            remainder = aggregator.flush()
-            if remainder and not should_abort():
-                yield remainder
-        finally:
-            close = getattr(stream, "close", None)
-            if close is not None:
-                await close()
+                    choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
+                    if choice is None:
+                        continue
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    content = getattr(delta, "content", None) or ""
+                    for sentence in aggregator.push(content):
+                        if should_abort():
+                            return
+                        yield sentence
+                    for part in getattr(delta, "tool_calls", None) or []:
+                        _accumulate_tool_call(tool_calls, part)
+                remainder = aggregator.flush()
+                if remainder and not should_abort() and not tool_calls:
+                    yield remainder
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    await close()
+
+            ordered = [tool_calls[i] for i in sorted(tool_calls) if tool_calls[i].get("name")]
+            if not ordered or execute_tool is None:
+                return
+
+            assistant_tools = []
+            for slot in ordered:
+                assistant_tools.append(
+                    {
+                        "id": slot["id"] or f"call_{len(assistant_tools)}",
+                        "type": "function",
+                        "function": {
+                            "name": slot["name"],
+                            "arguments": slot["arguments"] or "{}",
+                        },
+                    }
+                )
+            messages.append({"role": "assistant", "content": None, "tool_calls": assistant_tools})
+            for call in assistant_tools:
+                if should_abort():
+                    payload = json.dumps({"ok": False, "error": "interrupted"})
+                else:
+                    fn = call["function"]
+                    try:
+                        payload = await _run_tool(execute_tool, fn["name"], fn["arguments"])
+                    except Exception:
+                        logger.exception("Tool %s failed", fn["name"])
+                        payload = json.dumps({"ok": False, "error": "tool_failed"})
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": payload,
+                    }
+                )
+            if should_abort():
+                return
+        logger.warning("Hit max tool rounds (%s); stopping without speech", _MAX_TOOL_ROUNDS)

@@ -86,9 +86,9 @@ class ScriptedLlm:
     def __init__(self, sentences: list[str], error: Exception | None = None) -> None:
         self.sentences = sentences
         self.error = error
-        self.calls: list[list[dict[str, str]]] = []
+        self.calls: list[list[dict]] = []
 
-    async def stream_sentences(self, messages: list[dict[str, str]], should_abort: Callable[[], bool]):
+    async def stream_sentences(self, messages: list[dict], should_abort: Callable[[], bool], **_kwargs):
         self.calls.append(messages)
         if self.error:
             raise self.error
@@ -96,3 +96,88 @@ class ScriptedLlm:
             if should_abort():
                 return
             yield sentence
+
+
+class ToolThenSpeakLlm:
+    """Execute one tool via the real executor, then speak. Never yields tool JSON."""
+
+    def __init__(self, tool_name: str, tool_args: dict, sentences: list[str]) -> None:
+        self.tool_name = tool_name
+        self.tool_args = tool_args
+        self.sentences = sentences
+        self.results: list[str] = []
+        self.calls: list[list[dict]] = []
+
+    async def stream_sentences(self, messages: list[dict], should_abort: Callable[[], bool], **kwargs):
+        self.calls.append(messages)
+        execute_tool = kwargs.get("execute_tool")
+        if execute_tool is not None:
+            import json
+
+            result = execute_tool(self.tool_name, json.dumps(self.tool_args))
+            if hasattr(result, "__await__"):
+                result = await result
+            self.results.append(result)
+        for sentence in self.sentences:
+            if should_abort():
+                return
+            yield sentence
+
+
+class FakeRestaurantClient:
+    def __init__(self, result=None, booking_result=None, booking_error: str | None = None) -> None:
+        self.result = result
+        self.booking_result = booking_result if booking_result is not None else {"id": "bk-1"}
+        self.booking_error = booking_error
+        self.lookups: list[str] = []
+        self.created: list[dict] = []
+
+    async def find_by_hotline(self, hotline: str):
+        from booking.models import HotlineResult, Restaurant
+
+        self.lookups.append(hotline)
+        if isinstance(self.result, HotlineResult):
+            return self.result
+        if isinstance(self.result, Restaurant):
+            return HotlineResult(restaurant=self.result)
+        return HotlineResult(missing=True)
+
+    async def create_booking(self, body: dict):
+        from booking.models import BookingApiResult
+
+        self.created.append(body)
+        if self.booking_error:
+            return BookingApiResult(ok=False, error=self.booking_error)
+        return BookingApiResult(ok=True, data=self.booking_result)
+
+
+class FakeOrderClient:
+    def __init__(
+        self,
+        menu=None,
+        menu_error: str | None = None,
+        order_result=None,
+        order_error: str | None = None,
+    ) -> None:
+        self.menu = list(menu or [])
+        self.menu_error = menu_error
+        self.order_result = order_result if order_result is not None else {"id": "ord-1"}
+        self.order_error = order_error
+        self.menu_lookups: list[tuple[str, str]] = []
+        self.created: list[dict] = []
+
+    async def get_menu(self, restaurant_id: str, branch_id: str = ""):
+        from order.models import MenuResult
+
+        self.menu_lookups.append((restaurant_id, branch_id))
+        if self.menu_error:
+            return MenuResult(ok=False, error=self.menu_error)
+        return MenuResult(ok=True, items=list(self.menu))
+
+    async def create_order(self, body: dict):
+        from order.models import OrderApiResult
+
+        self.created.append(body)
+        if self.order_error:
+            return OrderApiResult(ok=False, error=self.order_error)
+        return OrderApiResult(ok=True, data=self.order_result)

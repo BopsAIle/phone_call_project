@@ -11,7 +11,11 @@ from openai import AsyncOpenAI
 
 from bridge.session import CallPipeline
 from config import Settings, load_settings
+from booking.client import RestaurantClient
+from booking.matcher import OpenAiBranchMatcher
 from llm.stream import OpenAiLlm
+from order.client import OrderClient
+from order.matcher import OpenAiMenuMatcher
 from stt.realtime import RealtimeTranscriptionClient
 from tts.openai_tts import OpenAiTts
 
@@ -37,6 +41,10 @@ def create_app(
     llm: Any = None,
     tts: Any = None,
     openai_client: Any = None,
+    restaurant_client: Any = None,
+    matcher: Any = None,
+    order_client: Any = None,
+    menu_matcher: Any = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     if not settings.ai_bridge_token:
@@ -70,14 +78,29 @@ def create_app(
         return RealtimeTranscriptionClient(openai_client, settings.openai_stt_model)
     #app.state là túi đựng của FastAPI, gắn vào object app, sống suốt lúc server chạy.
     # Restart process thì mất, tạo lại lúc create_app().
+    if restaurant_client is None:
+        restaurant_client = RestaurantClient(settings.restaurant_api_base)
+    if matcher is None and openai_client is not None:
+        matcher = OpenAiBranchMatcher(openai_client, settings.openai_model)
+    if order_client is None:
+        order_client = OrderClient(settings.restaurant_api_base)
+    if menu_matcher is None and openai_client is not None:
+        menu_matcher = OpenAiMenuMatcher(openai_client, settings.openai_model)
     app.state.stt_factory = stt_factory or default_stt_factory
     app.state.llm = llm
-    app.state.tts = tts # tts: 1 client tts được tạo ra từ openai_client
+    app.state.tts = tts  # tts: 1 client tts được tạo ra từ openai_client
+    app.state.restaurant_client = restaurant_client
+    app.state.branch_matcher = matcher
+    app.state.order_client = order_client
+    app.state.menu_matcher = menu_matcher
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+
+## Khởi tạo kết nối websocket, so sánh header Authorization với token trong config
+## Gọi Call Pipeline 
     @app.websocket("/v1/bridge")
     async def bridge(websocket: WebSocket) -> None:
         token = settings.ai_bridge_token
@@ -87,7 +110,16 @@ def create_app(
             return
         await websocket.accept()
         stt = app.state.stt_factory()
-        pipeline = CallPipeline(websocket, stt=stt, llm=app.state.llm, tts=app.state.tts)
+        pipeline = CallPipeline(
+            websocket,
+            stt=stt,
+            llm=app.state.llm,
+            tts=app.state.tts,
+            restaurant_client=app.state.restaurant_client,
+            matcher=app.state.branch_matcher,
+            order_client=app.state.order_client,
+            menu_matcher=app.state.menu_matcher,
+        )
         try:
             await pipeline.run()
         except WebSocketDisconnect:

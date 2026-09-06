@@ -43,6 +43,20 @@ def test_bridge_accepts_bearer_and_greeting() -> None:
             assert len(audio) % 2 == 0
 
 
+def test_bridge_accepts_vietnamese_session_init() -> None:
+    """Telephony backend (phone_call_project_viet) sends locale=vi and toNumber."""
+    with TestClient(_app()) as client:
+        with client.websocket_connect("/v1/bridge", headers={"Authorization": "Bearer secret"}) as ws:
+            ws.send_text(
+                '{"event":"session.init","callId":"c-vi","storeName":"Nha hang Placeholder",'
+                '"toNumber":"+4444444444","timezone":"Asia/Ho_Chi_Minh","locale":"vi",'
+                '"greeting":"Xin chao, day la tro ly tu dong.","resumed":false}'
+            )
+            audio = ws.receive_bytes()
+            assert len(audio) >= 2
+            assert len(audio) % 2 == 0
+
+
 def test_bridge_accepts_query_token() -> None:
     """Browsers cannot set Authorization on WebSocket; demo UI uses ?token=."""
     with TestClient(_app()) as client:

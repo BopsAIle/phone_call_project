@@ -9,17 +9,48 @@ export const FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH; // 3200
 
 export const EVENT_SESSION_INIT = "session.init";
 export const EVENT_INTERRUPT = "interrupt";
+export const EVENT_ORDER_CREATED = "order.created";
 
 export type SessionInit = {
   event: typeof EVENT_SESSION_INIT;
   callId: string;
   storeName: string;
+  toNumber?: string;
   timezone: string;
   locale: string;
   greeting: string;
 };
 
 export type InterruptEvent = { event: typeof EVENT_INTERRUPT };
+
+export type OrderCreatedItem = {
+  name?: string;
+  quantity?: number;
+  unit?: string;
+  note?: string;
+  line_total?: number;
+  lineTotal?: number;
+  currency?: string;
+};
+
+export type OrderCreatedEvent = {
+  event: typeof EVENT_ORDER_CREATED;
+  callId?: string;
+  fulfillment?: string;
+  message?: string;
+  orderId?: string;
+  customerName?: string;
+  phoneNumber?: string;
+  branchName?: string;
+  bookingDate?: string;
+  bookingTime?: string;
+  deliveryAddress?: string;
+  deliveryPhone?: string;
+  cart?: OrderCreatedItem[];
+  total?: number;
+  note?: string;
+  payment?: string;
+};
 
 export function newCallId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {

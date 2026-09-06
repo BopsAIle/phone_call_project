@@ -1,5 +1,5 @@
 """OpenAI Realtime transcription + server_vad. The model does not speak."""
-
+## file này chuyển user nói thành text
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +19,7 @@ VAD = {
     "type": "server_vad",
     "threshold": 0.5,
     "prefix_padding_ms": 300,
-    "silence_duration_ms": 800,
+    "silence_duration_ms": 450,
 }
 
 
@@ -46,7 +46,7 @@ def _event_field(event: Any, name: str, default: Any = None) -> Any:
         return event.get(name, default)
     return getattr(event, name, default)
 
-
+##stt
 class RealtimeTranscriptionClient:
     def __init__(self, client: Any, model: str, call_id: str = "") -> None:
         self._client = client

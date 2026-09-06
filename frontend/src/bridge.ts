@@ -1,9 +1,16 @@
-import { EVENT_INTERRUPT, EVENT_SESSION_INIT, type SessionInit } from "./protocol";
+import {
+  EVENT_INTERRUPT,
+  EVENT_ORDER_CREATED,
+  EVENT_SESSION_INIT,
+  type OrderCreatedEvent,
+  type SessionInit,
+} from "./protocol";
 
 export type BridgeHandlers = {
   onOpen?: () => void;
   onPcm?: (bytes: ArrayBuffer) => void;
   onInterrupt?: () => void;
+  onOrderCreated?: (payload: OrderCreatedEvent) => void;
   onControl?: (payload: Record<string, unknown>) => void;
   onClose?: (code: number, reason: string) => void;
   onError?: (message: string) => void;
@@ -57,6 +64,8 @@ export class BridgeClient {
           const payload = JSON.parse(event.data) as Record<string, unknown>;
           if (payload.event === EVENT_INTERRUPT) {
             handlers.onInterrupt?.();
+          } else if (payload.event === EVENT_ORDER_CREATED) {
+            handlers.onOrderCreated?.(payload as OrderCreatedEvent);
           }
           handlers.onControl?.(payload);
         } catch {

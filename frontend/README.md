@@ -55,10 +55,11 @@ Khớp [hợp đồng AI Bridge](../documents/backend_contract/ai-bridge-contrac
 
 | Hướng | Frame | Nội dung |
 | --- | --- | --- |
-| UI → AI | Text | `session.init` (`callId`, `storeName`, `timezone`, `locale`, `greeting`) |
+| UI → AI | Text | `session.init` (`callId`, `storeName`, `toNumber`, `timezone`, `locale`, `greeting`) |
 | UI → AI | Binary | PCM16 LE mono 16 kHz, ~100 ms / 3200 byte |
 | AI → UI | Binary | PCM agent, cùng định dạng |
 | AI → UI | Text | `{"event":"interrupt"}` khi barge-in — UI dừng playback ngay |
+| AI → UI | Text | `{"event":"order.created"}` khi `POST /menu/delivery/ai` (hoặc takeout) 2xx — UI hiện **Đã đặt hàng thành công** |
 
 Micro máy thường 44.1/48 kHz; `src/pcm.ts` resample tuyến tính xuống 16 kHz rồi đóng frame 3200 byte.
 
@@ -82,6 +83,6 @@ Có thể để URL là `/v1/bridge` để đi qua proxy Vite thay vì nối th�
 
 ## Phạm vi
 
-**Có:** thu mic, chào, hội thoại giọng, barge-in, mute, đổi token/URL/câu chào trên UI.
+**Có:** thu mic, chào, hội thoại giọng, barge-in, mute, đổi token/URL/câu chào/`toNumber` trên UI, banner **Đã đặt hàng thành công** khi AI tạo đơn. `toNumber` mặc định `1900636886` để server AI tra hotline và đặt bàn / đặt món in-process.
 
-**Không có:** Twilio, đặt bàn, transcript trên màn hình (hợp đồng v1 không gửi text).
+**Không có:** Twilio, transcript từng câu trên màn hình.

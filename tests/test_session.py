@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from bridge.session import CallPipeline, CallState
+from bridge.session import CallPipeline, CallState, ensure_intent_greeting
 from llm.stream import fallback_phrase
 from tests.fakes import FakeBridgeSocket, FakeSTT, ScriptedLlm, ScriptedTts, SlowTts
 
@@ -27,6 +27,49 @@ async def _start_pipeline(ws, stt, llm, tts):
 async def _stop(ws, task) -> None:
     await ws.disconnect()
     await asyncio.wait_for(task, timeout=2)
+
+
+def test_ensure_intent_greeting_keeps_english_verbatim() -> None:
+    greeting = INIT["greeting"]
+    assert ensure_intent_greeting(greeting, "en") == greeting
+
+
+def test_ensure_intent_greeting_appends_vietnamese_choice() -> None:
+    spoken = ensure_intent_greeting(
+        "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động.",
+        "vi",
+    )
+    assert spoken.endswith("Bạn muốn đặt bàn hay mang về ạ?")
+    assert spoken.startswith("Xin chào")
+
+
+def test_ensure_intent_greeting_does_not_duplicate_choice() -> None:
+    greeting = (
+        "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. "
+        "Bạn muốn đặt bàn hay mang về ạ?"
+    )
+    assert ensure_intent_greeting(greeting, "vi") == greeting
+
+
+async def test_vietnamese_init_speaks_booking_or_takeaway() -> None:
+    ws = FakeBridgeSocket()
+    tts = ScriptedTts()
+    pipeline, task = await _start_pipeline(ws, FakeSTT(), ScriptedLlm([]), tts)
+    await ws.push_text(
+        json.dumps(
+            {
+                **INIT,
+                "locale": "vi",
+                "greeting": "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động.",
+            }
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert tts.spoken == [
+        "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. "
+        "Bạn muốn đặt bàn hay mang về ạ?"
+    ]
+    await _stop(ws, task)
 
 
 async def test_greeting_speaks_verbatim_and_sends_pcm() -> None:

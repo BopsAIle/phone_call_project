@@ -22,8 +22,9 @@ FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH  # 3_200
 # --- Control events ---
 EVENT_SESSION_INIT = "session.init"
 EVENT_INTERRUPT = "interrupt"
+EVENT_ORDER_CREATED = "order.created"
 
-LOCALES = frozenset({"en", "de"})
+LOCALES = frozenset({"en", "de", "vi"})
 
 INTERRUPT_JSON = json.dumps({"event": EVENT_INTERRUPT}, separators=(",", ":"))
 
@@ -39,9 +40,10 @@ class SessionInit:
     timezone: str
     locale: str
     greeting: str
+    to_number: str = ""
 
     def to_dict(self) -> dict[str, str]:
-        return {
+        payload = {
             "event": EVENT_SESSION_INIT,
             "callId": self.call_id,
             "storeName": self.store_name,
@@ -49,6 +51,9 @@ class SessionInit:
             "locale": self.locale,
             "greeting": self.greeting,
         }
+        if self.to_number:
+            payload["toNumber"] = self.to_number
+        return payload
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
@@ -64,6 +69,7 @@ class SessionInit:
             timezone=str(payload.get("timezone") or "UTC"),
             locale=locale,
             greeting=str(payload.get("greeting") or ""),
+            to_number=str(payload.get("toNumber") or payload.get("to") or ""),
         )
 
 

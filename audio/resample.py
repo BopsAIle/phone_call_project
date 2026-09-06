@@ -8,7 +8,7 @@ import soxr
 BRIDGE_RATE = 16_000
 OPENAI_RATE = 24_000
 
-
+## buffer vẫn có thể 
 def even_pcm16(data: bytes, leftover: bytearray) -> bytes:
     """Return a whole-sample PCM16 buffer; stash a trailing odd byte if any."""
     if leftover:

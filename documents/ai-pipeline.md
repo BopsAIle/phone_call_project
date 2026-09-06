@@ -2,15 +2,17 @@
 
 **Trạng thái:** spec team AI, đường audio v1
 **Chủ sở hữu:** team AI
-**Cập nhật lần cuối:** 2026-08-25
+**Cập nhật lần cuối:** 2026-09-04
 **Implement:** [Hợp đồng AI Bridge](backend_contract/ai-bridge-contract.md)
 
 Tài liệu này là thiết kế dịch vụ AI. Backend điện thoại không thấy OpenAI,
 resample, trạng thái lượt nói, hay lịch sử LLM. Họ chỉ thấy WebSocket mô tả
-trong hợp đồng: PCM nhị phân hai chiều, `session.init`, và `interrupt`.
+trong hợp đồng: PCM nhị phân hai chiều, `session.init`, `interrupt`, và
+`order.created` khi tạo đơn món thành công.
 
-v1 chỉ sở hữu **audio vào → audio ra**. Tool đặt bàn và database là hook
-về sau, không thuộc đường này.
+v1 sở hữu **audio vào → audio ra**. Đặt bàn và đặt món (ship / mang về)
+chạy **in-process** qua tool LLM + Restaurant API. Wire: PCM + `interrupt`
++ `order.created` (một lần, khi POST đơn 2xx). RAG và chuyển lễ tân vẫn hoãn.
 
 ---
 
@@ -43,7 +45,7 @@ Dịch vụ này **không** sở hữu:
 
 - Twilio, mu-law, `streamSid`, cắt frame 20 ms, hay nhịp phát lại
 - Bản ghi cuộc gọi trong database backend
-- Đặt bàn ở v1 (xem [§10](#10-hoãn-lại--hook-công-cụ))
+- Database nhà hàng (AI chỉ gọi HTTP in-process; xem [§10](#10-công-cụ-đặt-bàn-và-đặt-món-in-process))
 
 Hình dạng pipeline: **cascaded** (nối tầng). Realtime API chỉ dùng cho
 **STT + VAD**. LLM và TTS là HTTP riêng. Không dùng Realtime speech-to-speech.
@@ -123,7 +125,12 @@ thêm thông tin giọng nói; chỉ để thỏa yêu cầu input Realtime.
 
 Một object session cho mỗi WebSocket. Field từ `session.init`:
 
-- `callId`, `storeName`, `timezone`, `locale`, `greeting`
+- `callId`, `storeName`, `toNumber`, `timezone`, `locale`, `greeting`
+- `resumed` (backend gửi; v1 bỏ qua)
+
+`toNumber` (E.164) được chuẩn hóa còn chữ số và prefetch
+`GET /restaurants/by-hotline/{digits}` song song với câu chào. Catalog
+(nhà hàng + chi nhánh active) sống trong RAM của session.
 
 Lịch sử LLM lúc bắt đầu:
 
@@ -236,7 +243,9 @@ Khi transcription **completed** tới (người gọi nói xong):
 Quy tắc prompt: văn nói, ngắn, đúng `locale`, không markdown, không list
 trừ khi người gọi cần nghe đọc.
 
-Context v1 = history + `session.init` thôi. Không gọi database.
+Context = history + `session.init` + catalog hotline trong RAM. Không
+gọi database của telephony backend. Đặt bàn và đặt món đi Restaurant API
+từ process AI (xem §10).
 
 LLM lỗi: nói cùng câu fallback như STT rỗng.
 
@@ -246,21 +255,30 @@ LLM lỗi: nói cùng câu fallback như STT rỗng.
 
 ## 8. TTS và phát lại
 
-Mỗi câu được flush là một request TTS. Câu hai có thể bắt đầu trong lúc
-câu một còn đang synth.
+Mỗi câu được flush là một request TTS HTTP mới
+(`audio.speech.with_streaming_response.create`). Câu hai **bắt đầu synth
+trong lúc câu một còn đang phát** (`TurnPlayer`). Câu đầu không overlap
+được với chính nó: phải đợi LLM flush câu hoàn chỉnh rồi mới mở TCP/TLS
++ TTFB.
+
+Để cắt TTFB trên điện thoại (PSTN không có nội dung trên 4 kHz):
 
 
-| Thiết lập         | Giá trị v1                                   |
-| ----------------- | -------------------------------------------- |
-| Model             | `gpt-4o-mini-tts`                            |
-| Voice             | `nova`                                       |
-| `response_format` | `pcm`                                        |
-| Stream            | có (`with_streaming_response` / tương đương) |
+| Thiết lập         | Giá trị v1                                                                 |
+| ----------------- | -------------------------------------------------------------------------- |
+| Model             | **`tts-1`** (nhanh). `tts-1-hd` nếu cần chất hơn; `gpt-4o-mini-tts` qua env |
+| Voice             | `nova`                                                                     |
+| `response_format` | `pcm` (24 kHz)                                                             |
+| Stream            | có (`with_streaming_response` / tương đương)                               |
+| `iter_bytes`      | **1024** byte (~21 ms @ 24 kHz), không 4096 (~85 ms thêm sau TTFB)         |
+| `instructions`    | **không gửi** với `tts-1` / `tts-1-hd` (API không hỗ trợ). `gpt-4o-*tts`: `"Phone, {locale}."` |
 
+
+`OPENAI_TTS_MODEL` / `TTS_CHUNK_BYTES` đổi được lúc chạy.
 
 Pipeline mỗi câu:
 
-1. TTS → chunk PCM 24 kHz.
+1. TTS → chunk PCM 24 kHz (yield sớm nhờ chunk nhỏ).
 2. Downsample xuống 16 kHz.
 3. Gửi nhị phân về backend ngay.
 4. Trước mỗi lần send, kiểm `generation_id`. Lệch → dừng, không gửi thêm
@@ -319,16 +337,31 @@ Tăng `generation_id` lúc bắt đầu Greeting, lúc bắt đầu mỗi câu t
 
 
 
-## 10. Hoãn lại — hook công cụ
+## 10. Công cụ đặt bàn và đặt món (in-process)
 
-v1 không gọi booking API hay kho RAG.
+Cùng một cuộc gọi, hai module. LLM suy ý định từ lời nói; không có bộ
+phân loại intent riêng. Tool chạy **trong** Thinking, **không đổi**
+bridge (vẫn PCM + `interrupt` + `order.created` khi POST đơn thành công):
 
-Vòng sau có thể thêm tool LLM (`check_availability`, `create_booking`,
-`search_knowledge`, `transfer_to_staff`) mà không đổi bridge:
+**Đặt bàn** (`booking/`):
 
-- Tool chạy **trong** Thinking, trước hoặc giữa các lần flush câu.
-- Audio nói trên WebSocket vẫn chỉ PCM + `interrupt`.
-- Nếu cần chuyển lễ tân trên wire, đó là control message **mới** và phải
+- `resolve_branch` / `confirm_branch` — khớp tên chi nhánh, lock `branch_id` trong RAM. Dùng chung cho cả hai luồng.
+- `create_booking` — `POST /bookings/ai` (fallback `POST /bookings` + `source=phone_ai`) với `restaurant_id` + `branch_id` từ RAM.
+
+**Đặt món / ship / mang về** (`order/`):
+
+- Khóa chi nhánh **trước** menu/đơn (cùng `resolve_branch` / `confirm_branch`). Một chi nhánh active: tự khóa. Nhiều chi nhánh: hỏi khách rồi khóa; `search_menu` / `create_order` trả `no_branch` nếu chưa khóa — không GET menu.
+- `search_menu` — `GET /menu/branch/{branchId}` (lười, không GET lúc chào), khớp tên món, không bịa.
+- `add_to_cart` / `update_cart` / `remove_from_cart` — giỏ trong RAM. Đổi chi nhánh thì xóa menu + giỏ.
+- `set_fulfillment` — `delivery` + địa chỉ chuỗi (+ SĐT người nhận nếu khác), hoặc `pickup` tại chi nhánh.
+- `save_order_details` — lưu dần tên, SĐT đặt, ngày, giờ, ghi chú, SĐT nhận. Trả `missing` / `ask_next`. Không POST.
+- `create_order` — `POST /menu/delivery/ai` hoặc `POST /menu/takeout/ai` khi đủ DTO: tên, SĐT, ngày, giờ, giỏ; giao hàng thêm địa chỉ. `delivery_fee=0`, `estimated_delivery_time` = giờ nhận. Thanh toán v1: COD. Không PATCH confirm. 2xx → gửi `order.created` trên socket để UI hiện “Đã đặt hàng thành công”.
+- Hợp đồng: [order-api-contract.md](order-api-contract.md). Đổi API thật = sửa `order/client.py`.
+
+Không TTS JSON/UUID/tên tool. `booking_created` và `order_created` độc lập
+(chống POST trùng từng loại). Đổi ý **trước khi chốt** thì không POST loại đã bỏ.
+
+Nếu cần chuyển lễ tân trên wire, đó là control message **mới** và phải
 thêm vào hợp đồng trước. Không có trong v1.
 
 Transcript giữ trong RAM cho LLM. Không gửi về backend trừ khi sau này
@@ -371,6 +404,8 @@ Không nằm trong cây telephony của repo này; đây là layout process AI.
 | `llm/stream.py`     | Chat stream + sentence aggregator                   |
 | `tts/openai_tts.py` | Stream PCM, downsample, gửi                         |
 | `turn/barge_in.py`  | Abort việc stale; `interrupt` sau audio đã gửi cuối |
+| `booking/`          | Tool đặt bàn + HTTP `POST /bookings`                |
+| `order/`            | Tool giỏ/đơn + HTTP `GET /menu/branch/{id}` và POST delivery/takeout |
 
 
 Không dùng full Pipecat transport. Nó không khớp thứ tự audio nhị phân +

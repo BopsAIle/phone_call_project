@@ -12,25 +12,31 @@ class Settings(BaseModel):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     openai_stt_model: str = "gpt-4o-mini-transcribe"
-    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_model: str = "tts-1"
     openai_tts_voice: str = "nova"
     ai_bridge_token: str = ""
     ai_bridge_host: str = "0.0.0.0"
     ai_bridge_port: int = 8080
     log_level: str = "INFO"
-    tts_chunk_bytes: int = Field(default=4096, ge=2)
+    tts_chunk_bytes: int = Field(default=1024, ge=2)
+    restaurant_api_base: str = "https://phone-call-project.onrender.com"
 
 
 def load_settings() -> Settings:
     load_dotenv()
     return Settings(
-        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        openai_stt_model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe"),
-        openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
-        openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "nova"),
-        ai_bridge_token=os.getenv("AI_BRIDGE_TOKEN", ""),
-        ai_bridge_host=os.getenv("AI_BRIDGE_HOST", "0.0.0.0"),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
+        openai_stt_model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe").strip(),
+        openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "tts-1").strip(),
+        openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "nova").strip(),
+        ai_bridge_token=os.getenv("AI_BRIDGE_TOKEN", "").strip(),
+        ai_bridge_host=os.getenv("AI_BRIDGE_HOST", "0.0.0.0").strip(),
         ai_bridge_port=int(os.getenv("AI_BRIDGE_PORT", "8080")),
-        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        log_level=os.getenv("LOG_LEVEL", "INFO").strip(),
+        tts_chunk_bytes=int(os.getenv("TTS_CHUNK_BYTES", "1024")),
+        restaurant_api_base=os.getenv(
+            "RESTAURANT_API_BASE",
+            "https://phone-call-project.onrender.com",
+        ).strip(),
     )

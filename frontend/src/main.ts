@@ -3,7 +3,7 @@ import { BridgeClient } from "./bridge";
 import { MicCapture } from "./capture";
 import { floatToPcm16, LinearResampler, PcmFramer, rms } from "./pcm";
 import { PcmPlayer } from "./playback";
-import { newCallId } from "./protocol";
+import { newCallId, type OrderCreatedEvent, type OrderCreatedItem } from "./protocol";
 import { PolarScope } from "./viz";
 
 const STORAGE_KEY = "ai-bridge-voice-demo";
@@ -12,6 +12,7 @@ type Settings = {
   wsUrl: string;
   token: string;
   storeName: string;
+  toNumber: string;
   locale: string;
   timezone: string;
   greeting: string;
@@ -21,16 +22,21 @@ const DEFAULTS: Settings = {
   wsUrl: import.meta.env.VITE_AI_BRIDGE_URL || "ws://127.0.0.1:8080/v1/bridge",
   token: import.meta.env.VITE_AI_BRIDGE_TOKEN || "",
   storeName: "Bella Vista",
+  toNumber: "1900636886",
   locale: "vi",
   timezone: "Asia/Ho_Chi_Minh",
   greeting:
-    "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động — mình có thể giúp gì ạ?",
+    "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. Bạn muốn đặt bàn hay mang về ạ?",
 };
+
+const LEGACY_GREETING =
+  "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động — mình có thể giúp gì ạ?";
 
 const els = {
   wsUrl: $("wsUrl", HTMLInputElement),
   token: $("token", HTMLInputElement),
   storeName: $("storeName", HTMLInputElement),
+  toNumber: $("toNumber", HTMLInputElement),
   locale: $("locale", HTMLSelectElement),
   timezone: $("timezone", HTMLInputElement),
   greeting: $("greeting", HTMLTextAreaElement),
@@ -45,6 +51,10 @@ const els = {
   healthLabel: $("healthLabel", HTMLElement),
   log: $("log", HTMLOListElement),
   scope: $("scope", HTMLCanvasElement),
+  orderBanner: $("orderBanner", HTMLElement),
+  orderBannerTitle: $("orderBannerTitle", HTMLElement),
+  orderBannerMeta: $("orderBannerMeta", HTMLElement),
+  orderBannerItems: $("orderBannerItems", HTMLUListElement),
 };
 
 function $<T extends HTMLElement>(id: string, ctor: { new (): T }): T {
@@ -59,7 +69,11 @@ function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+    const merged = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+    if (merged.greeting === LEGACY_GREETING) {
+      merged.greeting = DEFAULTS.greeting;
+    }
+    return merged;
   } catch {
     return { ...DEFAULTS };
   }
@@ -70,6 +84,7 @@ function readForm(): Settings {
     wsUrl: els.wsUrl.value.trim() || DEFAULTS.wsUrl,
     token: els.token.value.trim(),
     storeName: els.storeName.value.trim() || DEFAULTS.storeName,
+    toNumber: els.toNumber.value.trim() || DEFAULTS.toNumber,
     locale: els.locale.value || "vi",
     timezone: els.timezone.value.trim() || DEFAULTS.timezone,
     greeting: els.greeting.value.trim() || DEFAULTS.greeting,
@@ -80,6 +95,7 @@ function fillForm(s: Settings): void {
   els.wsUrl.value = s.wsUrl;
   els.token.value = s.token;
   els.storeName.value = s.storeName;
+  els.toNumber.value = s.toNumber;
   els.locale.value = s.locale;
   els.timezone.value = s.timezone;
   els.greeting.value = s.greeting;
@@ -99,6 +115,71 @@ function log(message: string, tone: "info" | "warn" | "ok" = "info"): void {
   els.log.prepend(li);
 }
 
+function hideOrderBanner(): void {
+  els.orderBanner.hidden = true;
+  els.orderBannerTitle.textContent = "Đã đặt hàng thành công";
+  els.orderBannerMeta.textContent = "";
+  els.orderBannerItems.replaceChildren();
+}
+
+function formatMoney(amount: number, currency = "VND"): string {
+  const formatted = Number(amount).toLocaleString("vi-VN");
+  return `${formatted} ${currency}`;
+}
+
+function formatWhen(date?: string, time?: string): string {
+  if (!date && !time) return "";
+  if (!date) return time || "";
+  const parts = date.split("-");
+  const pretty = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : date;
+  return time ? `${pretty} · ${time}` : pretty;
+}
+
+function lineLabel(item: OrderCreatedItem): string {
+  const qty = item.quantity ?? 1;
+  const unit = item.unit ? ` ${item.unit}` : "";
+  const name = item.name || "món";
+  let text = `${qty}${unit} ${name}`;
+  if (item.note) text += ` (${item.note})`;
+  const total = item.lineTotal ?? item.line_total;
+  if (typeof total === "number") {
+    text += ` — ${formatMoney(total, item.currency || "VND")}`;
+  }
+  return text;
+}
+
+function showOrderSuccess(payload: OrderCreatedEvent): void {
+  const title = (payload.message || "Đã đặt hàng thành công").trim();
+  els.orderBannerTitle.textContent = title;
+  const bits: string[] = [];
+  if (payload.orderId) bits.push(`Mã ${payload.orderId}`);
+  if (payload.branchName) bits.push(payload.branchName);
+  if (payload.fulfillment === "delivery") {
+    bits.push("Giao hàng");
+  } else if (payload.fulfillment === "pickup") {
+    bits.push("Mang về");
+  }
+  const when = formatWhen(payload.bookingDate, payload.bookingTime);
+  if (when) bits.push(when);
+  if (payload.customerName) bits.push(payload.customerName);
+  if (payload.phoneNumber) bits.push(payload.phoneNumber);
+  if (payload.deliveryAddress) bits.push(payload.deliveryAddress);
+  if (typeof payload.total === "number") {
+    bits.push(formatMoney(payload.total));
+  }
+  if (payload.payment === "cod") bits.push("Thanh toán khi nhận");
+  els.orderBannerMeta.textContent = bits.join(" · ");
+  els.orderBannerItems.replaceChildren();
+  for (const item of payload.cart || []) {
+    const li = document.createElement("li");
+    li.textContent = lineLabel(item);
+    els.orderBannerItems.append(li);
+  }
+  els.orderBanner.hidden = false;
+  setStatus(title);
+  log(title, "ok");
+}
+
 function setStatus(text: string): void {
   els.status.textContent = text;
 }
@@ -109,6 +190,7 @@ function setLiveUi(live: boolean): void {
   els.muteBtn.disabled = !live;
   els.wsUrl.disabled = live;
   els.token.disabled = live;
+  els.toNumber.disabled = live;
 }
 
 function healthUrlFromBridge(wsUrl: string): string {
@@ -163,6 +245,7 @@ let muted = false;
 let canSend = false;
 let agentSpeaking = false;
 let heardAgent = false;
+let orderPlaced = false;
 let levelTimer = 0;
 
 async function startCall(): Promise<void> {
@@ -177,6 +260,8 @@ async function startCall(): Promise<void> {
 
   setLiveUi(true);
   muted = false;
+  orderPlaced = false;
+  hideOrderBanner();
   els.muteBtn.textContent = "Tắt mic";
   setStatus("Đang xin quyền micro…");
   log("Xin micro");
@@ -225,6 +310,7 @@ async function startCall(): Promise<void> {
       bridge.sendInit({
         callId,
         storeName: settings.storeName,
+        toNumber: settings.toNumber,
         timezone: settings.timezone,
         locale: settings.locale,
         greeting: settings.greeting,
@@ -245,6 +331,10 @@ async function startCall(): Promise<void> {
       setStatus("Barge-in — agent dừng, đang nghe bạn.");
       log("interrupt từ AI", "ok");
     },
+    onOrderCreated: (payload) => {
+      orderPlaced = true;
+      showOrderSuccess(payload);
+    },
     onClose: (code, reason) => {
       log(`Socket đóng: ${reason} (${code})`, code === 1000 ? "info" : "warn");
       void endCall(false);
@@ -262,6 +352,10 @@ async function startCall(): Promise<void> {
       agentSpeaking = false;
     }
     if (!heardAgent || agentSpeaking) return;
+    if (orderPlaced) {
+      setStatus("Đã đặt hàng thành công");
+      return;
+    }
     setStatus(muted ? "Mic đang tắt" : "Đang nghe bạn nói");
   }, 800);
 }

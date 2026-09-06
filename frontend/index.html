@@ -28,6 +28,12 @@
         <section class="stage">
           <canvas id="scope" aria-hidden="true"></canvas>
           <p class="status" id="statusLabel">Nhấn Gọi để mở micro và kết nối server AI.</p>
+          <div class="order-banner" id="orderBanner" hidden aria-live="polite">
+            <p class="order-kicker">Đơn hàng</p>
+            <h2 id="orderBannerTitle">Đã đặt hàng thành công</h2>
+            <p class="order-meta" id="orderBannerMeta"></p>
+            <ul class="order-items" id="orderBannerItems"></ul>
+          </div>
           <p class="hint">Đeo tai nghe — loa máy sẽ lọt vào mic và dễ kích hoạt barge-in.</p>
           <div class="controls">
             <button type="button" class="btn call" id="callBtn">Gọi</button>
@@ -55,6 +61,10 @@
               <label>
                 Tên cửa hàng
                 <input id="storeName" name="storeName" />
+              </label>
+              <label>
+                Số nhận (toNumber)
+                <input id="toNumber" name="toNumber" spellcheck="false" autocomplete="off" />
               </label>
               <label>
                 Locale

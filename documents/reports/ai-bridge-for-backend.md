@@ -93,17 +93,22 @@ acknowledgement; start streaming audio right away.
   "event": "session.init",
   "callId": "clx8k2p9v0000abcd1234efgh",
   "storeName": "Bella Vista",
+  "toNumber": "+49301234567",
   "timezone": "Europe/Berlin",
   "locale": "en",
-  "greeting": "Thanks for calling Bella Vista. This is an automated assistant — how can I help you today?"
+  "greeting": "Thanks for calling Bella Vista. This is an automated assistant — how can I help you today?",
+  "resumed": false
 }
 ```
 
-All five fields are read. `timezone` must be an IANA zone — it is what makes
-"tonight" and "tomorrow" resolve against the restaurant's clock rather than our
-server's; an unparseable zone falls back to UTC and is logged. `locale` sets the
-transcription language and the wording of our error fallback line. `callId` is
-used for log correlation only.
+All of these fields are read. `toNumber` is the E.164 number the caller dialled
+(Twilio's `To`). We strip it to digits and look up the restaurant catalog; if it
+is missing or unknown we do not invent branches. `timezone` must be an IANA zone
+— it is what makes "tonight" and "tomorrow" resolve against the restaurant's
+clock rather than our server's; an unparseable zone falls back to UTC and is
+logged. `locale` sets the transcription language and the wording of our error
+fallback line. `callId` is used for log correlation only. `resumed` is accepted
+and ignored in v1 (a reconnect still greets).
 
 A second `session.init` on the same socket is ignored with a warning. Any control
 event we do not recognise is logged and ignored.
@@ -151,8 +156,9 @@ Do not wait for any of these — none are on this socket in v1.
 - **No transcript.** Conversation text lives in our memory for the language
   model and is never sent to you. If you need it for review or analytics, that
   is a new control message and a contract change; cheap now, awkward later.
-- **No booking, no tool calls, no database access.** Our entire context is
-  `session.init` plus in-memory history.
+- **No booking messages on this socket.** Table booking is in-process on our
+  side (`toNumber` → catalog → LLM tools → `POST /bookings`). You still only
+  send `session.init` and PCM; you still only receive PCM and `interrupt`.
 - **No resume after a socket drop.** Reconnect starts a new session: send a
   fresh `session.init`, and history is empty — the agent greets again and will
   not remember the conversation. `callId` does not key anything on our side.
@@ -245,7 +251,7 @@ production.
 connect   wss://<host>/v1/bridge      Authorization: Bearer <AI_BRIDGE_TOKEN>
 health    GET /health                 {"status":"ok"}
 
-you  →  us    text    {"event":"session.init", callId, storeName, timezone, locale, greeting}
+you  →  us    text    {"event":"session.init", callId, storeName, toNumber, timezone, locale, greeting}
 you  →  us    binary  caller PCM16 LE mono 16 kHz, ~100 ms / 3.200 bytes
 us   →  you   binary  agent PCM16 LE mono 16 kHz, arbitrary size, whole samples
 us   →  you   text    {"event":"interrupt"}        ← flush your Twilio buffer
