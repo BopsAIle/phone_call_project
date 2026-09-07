@@ -143,7 +143,7 @@ cp .env.example .env
 | `OPENAI_API_KEY` | Key OpenAI - thiếu thì STT/LLM/TTS fail trên cuộc gọi thật |
 | `AI_BRIDGE_TOKEN` | Bearer token backend phải gửi lúc handshake - trống thì mọi kết nối bị từ chối |
 
-Tùy chọn: `OPENAI_MODEL`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL` (mặc định `tts-1`; `tts-1-hd` nếu cần chất hơn), `OPENAI_TTS_VOICE`, `TTS_CHUNK_BYTES` (mặc định `1024`), `AI_BRIDGE_HOST` (mặc định `0.0.0.0`), `AI_BRIDGE_PORT` (mặc định `8080`), `LOG_LEVEL`, `RESTAURANT_API_BASE` (mặc định `https://phone-call-project.onrender.com` — đặt bàn / đặt món).
+Tùy chọn: `OPENAI_MODEL`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL` (mặc định `tts-1`; `tts-1-hd` nếu cần chất hơn), `OPENAI_TTS_VOICE`, `TTS_CHUNK_BYTES` (mặc định `1024`), `AI_BRIDGE_HOST` (mặc định `0.0.0.0`), `AI_BRIDGE_PORT` (mặc định `8080`), `LOG_LEVEL`, `RESTAURANT_API_BASE` (mặc định `http://127.0.0.1:3001` — NestJS local, đặt bàn / đặt món).
 
 ### 3. Chạy server
 

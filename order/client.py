@@ -15,7 +15,7 @@ from order.models import MenuItem, MenuResult, OrderApiResult
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://phone-call-project.onrender.com"
+DEFAULT_BASE_URL = "http://127.0.0.1:3001"
 _DEFAULT_TIMEOUT = 30.0
 _AVAILABLE_STATUS = {"available"}
 _UNAVAILABLE_STATUS = {"unavailable", "sold_out", "sold-out"}

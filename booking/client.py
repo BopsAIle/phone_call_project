@@ -12,7 +12,7 @@ from booking.models import BookingApiResult, Branch, HotlineResult, Restaurant
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://phone-call-project.onrender.com"
+DEFAULT_BASE_URL = "http://127.0.0.1:3001"
 _DEFAULT_TIMEOUT = 30.0
 
 ## Chuẩn hóa số điện thoại từ font-end gửi sang
