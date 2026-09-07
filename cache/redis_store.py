@@ -13,6 +13,8 @@ DEFAULT_NAMESPACE = "aibridge"
 DEFAULT_GENERATION_TTL = 10800
 
 
+## CatalogCache giống như 1 đối tượng lưu trữ các thông tin về menu, hotline, index, version của 1 nhà hàng
+#Khi nào cần lấy từ Redis thì sẽ gọi đến CatalogCache
 class CatalogCache:
     """Redis-backed restaurant/menu cache. Readers follow pointer → generation keys.
 
