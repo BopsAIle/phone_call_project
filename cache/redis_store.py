@@ -101,6 +101,16 @@ def _load_menu(raw: object) -> list[MenuItem] | None:
 
 ## CatalogCache giống như 1 đối tượng lưu trữ các thông tin về menu, hotline, index, version của 1 nhà hàng
 #Khi nào cần lấy từ Redis thì sẽ gọi đến CatalogCache
+#
+# Ví dụ snapshot g1 (pointer = "g1"):
+#   Key Redis                                    Giá trị (ý nghĩa)
+#   aibridge:catalog:pointer                     "g1" — biển “đang dùng”
+#   aibridge:catalog:generation                  1 — bộ đếm
+#   aibridge:catalog:g1:version                  "hash-v1"
+#   aibridge:catalog:g1:hotline:1900636886       JSON của Restaurant
+#   aibridge:catalog:g1:hotline:02839123456      cùng JSON Restaurant đó
+#   aibridge:catalog:g1:menu:q1                  JSON mảng món
+#   aibridge:catalog:g1:index                    {"restaurants":1,"hotlines":2,"menus":1}
 class CatalogCache:
     """Người giữ chìa Redis: đọc/ghi danh mục nhà hàng (restaurant + menu).
 
@@ -183,6 +193,7 @@ class CatalogCache:
             if str(branch_id or "").strip()
         }
         by_id = {restaurant.id: restaurant for restaurant in by_hotline.values()}
+        #Đóng gói 1 chuỗi JSON chứa số lượng restaurant, hotline, menu
         index = json.dumps(
             {
                 "restaurants": len(by_id),
@@ -191,9 +202,11 @@ class CatalogCache:
             },
             ensure_ascii=False,
         )
-
+        # Khởi tạo hàng đợi(các lệnh thêm vào Redis sẽ được thêm lần lượt)
         pipe = self._redis.pipeline()
+        #Lệnh lưu version vào Redis sẽ được thêm vào hàng đợi pipe
         pipe.set(self._version_key(generation), version, ex=ttl)
+        #Lệnh lưu restaurant vào Redis sẽ được thêm vào hàng đợi pipe
         for digits, restaurant in by_hotline.items():
             pipe.set(
                 self._hotline_key(generation, digits),
@@ -204,7 +217,7 @@ class CatalogCache:
             pipe.set(self._menu_key(generation, branch_id), _dump_menu(items), ex=ttl)
         pipe.set(self._index_key(generation), index, ex=ttl)
         await pipe.execute()
-
+        #Cập nhật pointer sang generation mới
         await self._redis.set(self._pointer_key(), generation)
 
         logger.info(
