@@ -6,11 +6,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable, Protocol
+
+from bridge.protocol import BYTES_PER_SECOND
 
 logger = logging.getLogger(__name__)
 
 INTERRUPT_JSON = json.dumps({"event": "interrupt"}, separators=(",", ":"))
+LEAD_SECONDS = 0.06
 
 
 class BridgeSocket(Protocol):
@@ -43,6 +47,12 @@ class OutboundGate:
         self.websocket = websocket
         self.session = session
         self.lock = asyncio.Lock()
+        self.bytes_sent = 0
+        self.first_frame_at: float | None = None
+
+    def reset_playback_clock(self) -> None:
+        self.bytes_sent = 0
+        self.first_frame_at = None
 
     async def send_audio(self, generation_id: int, pcm: bytes) -> bool:
         if len(pcm) % 2:
@@ -53,6 +63,9 @@ class OutboundGate:
             if self.session.closed or self.session.generation_id != generation_id:
                 return False
             await self.websocket.send_bytes(pcm)
+            if self.first_frame_at is None:
+                self.first_frame_at = time.monotonic()
+            self.bytes_sent += len(pcm)
             self.session.mark_audio_sent()
             return True
 
@@ -97,6 +110,7 @@ async def abort_and_interrupt(
             session.call_id,
         )
         await outbound._send_interrupt_locked()
+        outbound.reset_playback_clock()
         session.commit_partial_assistant()
         session.state = "Listening"
 
@@ -104,3 +118,12 @@ async def abort_and_interrupt(
     if asyncio.iscoroutine(result):
         await result
     return session.generation_id
+
+
+def remaining_playback_seconds(gate: OutboundGate, grace_ms: int) -> float:
+    """Client still has this much audio queued after the last server send."""
+    if gate.first_frame_at is None:
+        return 0.0
+    audio_seconds = gate.bytes_sent / BYTES_PER_SECOND
+    elapsed = time.monotonic() - gate.first_frame_at
+    return max(0.0, audio_seconds - elapsed) + LEAD_SECONDS + grace_ms / 1000.0

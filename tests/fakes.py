@@ -8,6 +8,8 @@ class FakeBridgeSocket:
     def __init__(self) -> None:
         self.sent: list[tuple[str, bytes | str]] = []
         self.incoming: asyncio.Queue[dict] = asyncio.Queue()
+        self.close_calls: list[tuple[int, str]] = []
+        self.closed = False
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent.append(("bytes", data))
@@ -23,6 +25,13 @@ class FakeBridgeSocket:
 
     async def push_bytes(self, data: bytes) -> None:
         await self.incoming.put({"type": "websocket.receive", "bytes": data})
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.close_calls.append((code, reason))
+        if self.closed:
+            return
+        self.closed = True
+        await self.incoming.put({"type": "websocket.disconnect", "code": code})
 
     async def disconnect(self) -> None:
         await self.incoming.put({"type": "websocket.disconnect", "code": 1000})

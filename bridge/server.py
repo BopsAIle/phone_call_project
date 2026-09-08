@@ -277,6 +277,7 @@ def create_app(
             menu_matcher=app.state.menu_matcher,
             catalog_cache=getattr(app.state, "catalog_cache", None),
             cache_ttl=settings.cache_ttl_seconds,
+            call_end_grace_ms=settings.call_end_grace_ms,
         )
         try:
             await pipeline.run()

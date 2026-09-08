@@ -14,11 +14,11 @@ from audio.resample import BRIDGE_RATE, OPENAI_RATE, StreamResampler, even_pcm16
 from booking.client import normalize_hotline
 from booking.models import Branch, Restaurant
 from booking.tools import BOOKING_TOOL_NAMES, BOOKING_TOOLS, BookingTools
-from bridge.protocol import EVENT_ORDER_CREATED
+from bridge.protocol import EVENT_CALL_END, EVENT_ORDER_CREATED
 from llm.stream import build_system_prompt, fallback_phrase
 from order.models import CartLine, MenuItem
 from order.tools import ORDER_TOOL_NAMES, ORDER_TOOLS, OrderTools, order_status_prompt
-from turn.barge_in import OutboundGate, abort_and_interrupt
+from turn.barge_in import OutboundGate, abort_and_interrupt, remaining_playback_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +215,7 @@ class TurnPlayer:
         self._sentence_qs: asyncio.Queue[Optional[tuple[str, asyncio.Queue[Optional[bytes]]]]] = asyncio.Queue()
         self._synth_tasks: list[asyncio.Task[None]] = []
         self._aborted = False
+        self.outbound.reset_playback_clock()
         self._sender = asyncio.create_task(self._sender_loop(), name="turn-sender")
 
     def should_abort(self) -> bool:
@@ -305,6 +306,7 @@ class CallPipeline:
         menu_matcher: Any = None,
         catalog_cache: Any = None,
         cache_ttl: int = 600,
+        call_end_grace_ms: int = 300, ## Tham số này được mặc địng cộng thêm thêmvafo thời gian chờ trước khi cúp máy
     ) -> None:
         self.websocket = websocket
         self.stt = stt
@@ -313,6 +315,7 @@ class CallPipeline:
         self._restaurant = restaurant_client
         self._cache = catalog_cache
         self._cache_ttl = max(int(cache_ttl), 1)
+        self._call_end_grace_ms = max(int(call_end_grace_ms), 0)
         self.session = CallSession()
         self._booking = (
             BookingTools(self.session, restaurant_client, matcher) if restaurant_client is not None else None
@@ -338,6 +341,9 @@ class CallPipeline:
         self._turn_lock = asyncio.Lock()
         self._stt_start_task: Optional[asyncio.Task[None]] = None
         self._catalog_task: Optional[asyncio.Task[None]] = None
+        self._hangup_task: Optional[asyncio.Task[None]] = None
+        self._created_this_turn = False
+        self._shutting_down = False
 
     async def run(self) -> None:
         # Khởi động dịch vụ speech to text
@@ -535,6 +541,7 @@ class CallPipeline:
                 self._player = None
 
     async def on_speech_started(self) -> None:
+        await self._cancel_hangup()
         async with self._turn_lock:
             if self.session.closed or self.session.state in (CallState.CLOSED, CallState.BARGE_IN, CallState.LISTENING):
                 return
@@ -552,6 +559,7 @@ class CallPipeline:
         logger.debug("transcript delta %s %r", self.session.tag, delta)
 
     async def on_transcript_completed(self, text: str) -> None:
+        await self._cancel_hangup()
         async with self._turn_lock:
             if self.session.closed:
                 return
@@ -566,13 +574,26 @@ class CallPipeline:
 
     async def _execute_tool(self, name: str, arguments_json: str) -> str:
         if name in BOOKING_TOOL_NAMES and self._booking is not None:
-            return await self._booking.execute(name, arguments_json)
+            result = await self._booking.execute(name, arguments_json)
+            self._note_created_this_turn(name, result)
+            return result
         if name in ORDER_TOOL_NAMES and self._order is not None:
             result = await self._order.execute(name, arguments_json)
+            self._note_created_this_turn(name, result)
             if name == "create_order":
                 await self._notify_order_created(result)
             return result
         return json.dumps({"ok": False, "error": "unknown_tool"})
+
+    def _note_created_this_turn(self, name: str, raw_result: str) -> None:
+        if name not in {"create_booking", "create_order"}:
+            return
+        try:
+            payload = json.loads(raw_result)
+        except json.JSONDecodeError:
+            return
+        if isinstance(payload, dict) and payload.get("ok") and not payload.get("already_created"):
+            self._created_this_turn = True
 
     async def _notify_order_created(self, raw_result: str) -> None:
         try:
@@ -622,6 +643,7 @@ class CallPipeline:
 
     async def _run_reply(self, user_text: str) -> None:
         self.session.begin_generation()
+        self._created_this_turn = False
         self.session.state = CallState.THINKING
         task = self._catalog_task
         if task is not None:
@@ -662,6 +684,8 @@ class CallPipeline:
                     return
                 await player.speak_sentence(sentence)
             await player.finish()
+            if not player.should_abort():
+                self._maybe_schedule_hangup()
         except asyncio.CancelledError:
             await player.abort()
             raise
@@ -707,7 +731,76 @@ class CallPipeline:
 
         await abort_and_interrupt(session=self.session, outbound=self.outbound, abort_work=abort_work)
 
+    def _spoke_closing_sentence(self) -> bool:
+        last = self.session.history[-1] if self.session.history else None
+        return bool(last and last.get("role") == "assistant" and str(last.get("content") or "").strip())
+
+    def _should_hangup_after_turn(self) -> bool:
+        if self.session.closed:
+            return False
+        if not self._created_this_turn:
+            return False
+        if not (self.session.booking_created or self.session.order_created):
+            return False
+        if self.session.cart and not self.session.order_created:
+            return False
+        return self._spoke_closing_sentence()
+
+    def _maybe_schedule_hangup(self) -> None:
+        if not self._should_hangup_after_turn():
+            return
+        self._hangup_task = asyncio.create_task(self._hangup_after_playback(), name="call-hangup")
+
+    async def _cancel_hangup(self) -> None:
+        task = self._hangup_task
+        if task is None or task.done():
+            self._hangup_task = None
+            return
+        task.cancel()
+        self._hangup_task = None
+        logger.info("Hủy cúp máy: khách còn muốn nói tiếp %s", self.session.tag)
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+# Sau câu chốt, server không cúp máy ngay, nó ước lượng client còn bao nhiêu giây audio mới đóng rồi chờ hết
+    async def _hangup_after_playback(self) -> None:
+        try:
+            grace = remaining_playback_seconds(self.outbound, self._call_end_grace_ms)
+            await asyncio.sleep(grace)
+            if self.session.closed:
+                return
+            await self.outbound.send_json(
+                {
+                    "event": EVENT_CALL_END,
+                    "reason": "completed",
+                    "callId": self.session.call_id,
+                }
+            )
+            closer = getattr(self.websocket, "close", None)
+            if closer is not None:
+                try:
+                    await closer(code=1000, reason="completed")
+                except Exception:
+                    logger.debug("websocket close after call.end failed %s", self.session.tag, exc_info=True)
+            await self.shutdown()
+        except asyncio.CancelledError:
+            raise
+
+## Shutdown pipeline: cúp máy, release resources
     async def shutdown(self) -> None:
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        hangup = self._hangup_task
+        if hangup is not None and not hangup.done() and hangup is not asyncio.current_task():
+            hangup.cancel()
+            try:
+                await hangup
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._hangup_task = None
         self.session.closed = True
         self.session.state = CallState.CLOSED
         self.session.playing = False

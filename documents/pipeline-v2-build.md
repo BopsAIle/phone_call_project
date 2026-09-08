@@ -99,6 +99,8 @@ flowchart TB
 
 
 
+
+### Sau câu chốt, server không cúp máy ngay, nó ước lượng client còn bao nhiêu giây audio mới đóng rồi chờ hết
 ### Bước 5 — Grace hangup
 
 - [ ] `OutboundGate` đếm `bytes_sent` / `first_frame_at` + `remaining_playback_seconds`

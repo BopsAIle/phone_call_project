@@ -23,6 +23,7 @@ FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH  # 3_200
 EVENT_SESSION_INIT = "session.init"
 EVENT_INTERRUPT = "interrupt"
 EVENT_ORDER_CREATED = "order.created"
+EVENT_CALL_END = "call.end"
 
 LOCALES = frozenset({"en", "de", "vi"})
 
