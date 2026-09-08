@@ -157,7 +157,7 @@ export class MenuController {
   })
   async createTakeoutBooking(
     @Body() createTakeoutBookingDto: CreateTakeoutBookingDto,
-  ): Promise<any> {
+  ): Promise<Booking & { order_items: OrderItem[] }> {
     return await this.menuService.createTakeoutBooking(createTakeoutBookingDto);
   }
 
@@ -199,7 +199,7 @@ export class MenuController {
     status: 400,
     description: 'Không thể xác nhận booking này',
   })
-  async confirmTakeoutBooking(@Param('bookingId') bookingId: string): Promise<any> {
+  async confirmTakeoutBooking(@Param('bookingId') bookingId: string): Promise<Booking> {
     return await this.menuService.confirmTakeoutBooking(bookingId);
   }
 
@@ -226,7 +226,7 @@ export class MenuController {
   })
   async createDeliveryBooking(
     @Body() createDeliveryBookingDto: CreateDeliveryBookingDto,
-  ): Promise<any> {
+  ): Promise<Booking & { order_items: OrderItem[] }> {
     return await this.menuService.createDeliveryBooking(createDeliveryBookingDto);
   }
 
@@ -252,7 +252,7 @@ export class MenuController {
     status: 400,
     description: 'Không thể xác nhận booking này',
   })
-  async confirmDeliveryBooking(@Param('bookingId') bookingId: string): Promise<any> {
+  async confirmDeliveryBooking(@Param('bookingId') bookingId: string): Promise<Booking> {
     return await this.menuService.confirmDeliveryBooking(bookingId);
   }
 }

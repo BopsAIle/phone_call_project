@@ -13,6 +13,8 @@ import { MenuRepository } from './menu.repository';
 import { OrderItemRepository } from './order-item.repository';
 import { BookingsService } from '../bookings/bookings.service';
 import { BranchesService } from '../branches/branches.service';
+import { OrderCodeUtil } from '../common/utils/order-code.util';
+import { BookingRepository } from '../bookings/booking.repository';
 import { RestaurantsService } from '../restaurants/restaurants.service';
 import { BookingStatus, BookingSource, ShipperStatus } from '../bookings/entities/booking.entity';
 import { BranchStatus } from '../branches/entities/branch.entity';
@@ -27,6 +29,7 @@ export class MenuService {
     private readonly bookingsService: BookingsService,
     private readonly branchesService: BranchesService,
     private readonly restaurantsService: RestaurantsService,
+    private readonly bookingRepository: BookingRepository,
   ) {}
 
   async createMenuItem(createMenuItemDto: CreateMenuItemDto): Promise<MenuItem> {
@@ -171,6 +174,15 @@ export class MenuService {
       totalPrice += menuItem.price * item.quantity;
     }
 
+    // Generate order code
+    const branchCode = createTakeoutBookingDto.branch_id.slice(0, 4).toUpperCase();
+    const nextCounter = await OrderCodeUtil.getNextCounter(
+      this.bookingRepository,
+      createTakeoutBookingDto.branch_id,
+      today,
+    );
+    const orderCode = OrderCodeUtil.generateOrderCode(branchCode, nextCounter);
+
     // Tạo booking với booking_type = TAKEOUT
     const bookingData: any = {
       restaurant_id: createTakeoutBookingDto.restaurant_id,
@@ -185,6 +197,7 @@ export class MenuService {
       note: createTakeoutBookingDto.note || 'Đặt hàng mang về qua AI voice',
       source: BookingSource.PHONE_AI,
       status: BookingStatus.PENDING,
+      order_code: orderCode,
     };
 
     const booking = await this.bookingsService.createFromDto(bookingData);
@@ -375,6 +388,15 @@ export class MenuService {
     // Thêm phí giao hàng vào total price
     totalPrice += createDeliveryBookingDto.delivery_fee;
 
+    // Generate order code
+    const branchCode = createDeliveryBookingDto.branch_id.slice(0, 4).toUpperCase();
+    const nextCounter = await OrderCodeUtil.getNextCounter(
+      this.bookingRepository,
+      createDeliveryBookingDto.branch_id,
+      today,
+    );
+    const orderCode = OrderCodeUtil.generateOrderCode(branchCode, nextCounter);
+
     // Tạo booking với booking_type = DELIVERY
     const bookingData: any = {
       restaurant_id: createDeliveryBookingDto.restaurant_id,
@@ -395,6 +417,7 @@ export class MenuService {
       delivery_fee: createDeliveryBookingDto.delivery_fee,
       estimated_delivery_time: createDeliveryBookingDto.estimated_delivery_time,
       shipper_status: ShipperStatus.PENDING,
+      order_code: orderCode,
     };
 
     const booking = await this.bookingsService.createFromDto(bookingData);

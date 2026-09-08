@@ -46,6 +46,9 @@ export class Booking {
   @Column({ type: 'uuid' })
   branch_id: string;
 
+  @Column({ type: 'varchar', length: 50, nullable: true })
+  order_code: string;
+
   @Column({ type: 'varchar', length: 255, nullable: false })
   customer_name: string;
 
