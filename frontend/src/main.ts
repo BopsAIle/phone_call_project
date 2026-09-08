@@ -83,6 +83,11 @@ function loadSettings(): Settings {
     if (merged.greeting === LEGACY_GREETING) {
       merged.greeting = DEFAULTS.greeting;
     }
+    // Token luôn lấy theo VITE_AI_BRIDGE_TOKEN hiện tại (.env), không dùng giá trị
+    // cũ còn sót trong localStorage — tránh lệch token mỗi khi .env đổi.
+    if (DEFAULTS.token) {
+      merged.token = DEFAULTS.token;
+    }
     return merged;
   } catch {
     return { ...DEFAULTS };
