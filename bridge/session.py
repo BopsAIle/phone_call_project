@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -88,6 +89,7 @@ class CallSession:
     order_booking_time: str = ""
     order_note: str = ""
     order_created: bool = False
+    cache_generation: str = ""
 
     def cart_summary_text(self) -> str:
         parts: list[str] = []
@@ -301,18 +303,30 @@ class CallPipeline:
         matcher: Any = None,
         order_client: Any = None,
         menu_matcher: Any = None,
+        catalog_cache: Any = None,
+        cache_ttl: int = 600,
     ) -> None:
         self.websocket = websocket
         self.stt = stt
         self.llm = llm
         self.tts = tts
         self._restaurant = restaurant_client
+        self._cache = catalog_cache
+        self._cache_ttl = max(int(cache_ttl), 1)
         self.session = CallSession()
         self._booking = (
             BookingTools(self.session, restaurant_client, matcher) if restaurant_client is not None else None
         )
         self._order = (
-            OrderTools(self.session, order_client, menu_matcher) if order_client is not None else None
+            OrderTools(
+                self.session,
+                order_client,
+                menu_matcher,
+                cache=catalog_cache,
+                cache_ttl=self._cache_ttl,
+            )
+            if order_client is not None
+            else None
         )
         self.outbound = OutboundGate(websocket, self.session)
         self._upsampler = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
@@ -412,7 +426,7 @@ class CallPipeline:
             self.session.locale,
             self.session.to_number or "-",
         )
-        if self._restaurant is not None:
+        if self._restaurant is not None or self._cache is not None:
             self._catalog_task = asyncio.create_task(self._load_catalog(), name="catalog")
         update = getattr(self.stt, "update_language", None)
         if update is not None:
@@ -422,40 +436,79 @@ class CallPipeline:
                 logger.exception("STT language update failed %s", self.session.tag)
         self._spawn(self._run_greeting())
 
+
+#_load_catalog nạp hồ sơ nhà hàng vào cuộc gọi — tên, 
+# chi nhánh — rồi gắn vào CallSession để LLM/tool đặt bàn và đặt món biết đang nói với quán nào.
     async def _load_catalog(self) -> None:
         try:
             if not self.session.to_number:
                 self.session.restaurant_missing = True
                 logger.warning("Hotline catalog skipped: empty toNumber %s", self.session.tag)
                 return
-            result = await self._restaurant.find_by_hotline(self.session.to_number)
-            if result.restaurant is not None:
-                self.session.apply_restaurant(result.restaurant)
-                if len(self.session.branches) == 1:
-                    self.session.select_branch(self.session.branches[0].id)
-                logger.info(
-                    "Hotline catalog %s restaurant=%r branches=%s locked=%s",
-                    self.session.tag,
-                    self.session.restaurant_name,
-                    len(self.session.branches),
-                    self.session.selected_branch_id or "-",
-                )
-            else:
+
+            restaurant = await self._restaurant_from_cache()
+            http_error = ""
+            if restaurant is None and self._restaurant is not None:
+                result = await self._restaurant.find_by_hotline(self.session.to_number)
+                restaurant = result.restaurant
+                http_error = result.error or ""
+                if restaurant is not None and self._cache is not None:
+                    with contextlib.suppress(Exception):
+                        await self._cache.put_restaurant(
+                            self.session.to_number,
+                            restaurant,
+                            ttl=self._cache_ttl,
+                        )
+                    await self._pin_cache_generation()
+
+            if restaurant is None:
                 self.session.restaurant_missing = True
-                if result.error:
-                    logger.warning("Hotline lookup error %s err=%s", self.session.tag, result.error)
+                if http_error:
+                    logger.warning("Hotline lookup error %s err=%s", self.session.tag, http_error)
                 else:
                     logger.warning(
                         "Hotline catalog not found %s to=%s",
                         self.session.tag,
                         self.session.to_number,
                     )
+                return
+
+            self.session.apply_restaurant(restaurant)
+            if len(self.session.branches) == 1:
+                self.session.select_branch(self.session.branches[0].id)
+            logger.info(
+                "Hotline catalog %s restaurant=%r branches=%s locked=%s gen=%s",
+                self.session.tag,
+                self.session.restaurant_name,
+                len(self.session.branches),
+                self.session.selected_branch_id or "-",
+                self.session.cache_generation or "-",
+            )
         except Exception:
             logger.exception("Hotline catalog failed %s", self.session.tag)
             self.session.restaurant_missing = True
         finally:
             self.session.catalog_ready = True
             self.session.refresh_system_prompt()
+
+    async def _pin_cache_generation(self) -> None:
+        if self._cache is None or self.session.cache_generation:
+            return
+        try:
+            self.session.cache_generation = await self._cache.current_generation()
+        except Exception:
+            logger.warning("Cache generation pin failed %s", self.session.tag, exc_info=True)
+
+    async def _restaurant_from_cache(self):
+        if self._cache is None:
+            return None
+        try:
+            await self._pin_cache_generation()
+            generation = self.session.cache_generation or None
+            return await self._cache.get_restaurant(self.session.to_number, generation=generation)
+        except Exception:
+            logger.warning("Cache read failed %s; falling back to HTTP", self.session.tag, exc_info=True)
+            return None
 
     async def _run_greeting(self) -> None:
         if not self.session.greeting.strip():

@@ -494,10 +494,19 @@ def _order_details_public(session: Any) -> dict[str, Any]:
 
 
 class OrderTools:
-    def __init__(self, session: Any, client: Any, matcher: Any) -> None:
+    def __init__(
+        self,
+        session: Any,
+        client: Any,
+        matcher: Any,
+        cache: Any = None,
+        cache_ttl: int = 600,
+    ) -> None:
         self._session = session
         self._client = client
         self._matcher = matcher
+        self._cache = cache
+        self._cache_ttl = max(int(cache_ttl), 1)
 
     def _mark_order_intent(self) -> None:
         session = self._session
@@ -571,12 +580,34 @@ class OrderTools:
             payload["status"] = "none"
             return payload
         branch_id = str(getattr(session, "selected_branch_id", "") or "")
-        result = await self._client.get_menu(restaurant_id, branch_id)
-        if not result.ok:
-            return {"ok": False, "error": result.error or "menu_failed", "status": "none"}
-        session.menu = list(result.items)
+        items = await self._menu_from_cache(branch_id)
+        if items is None:
+            result = await self._client.get_menu(restaurant_id, branch_id)
+            if not result.ok:
+                return {"ok": False, "error": result.error or "menu_failed", "status": "none"}
+            items = list(result.items)
+            await self._write_through_menu(branch_id, items)
+        session.menu = list(items)
         session.menu_ready = True
         return None
+
+    async def _menu_from_cache(self, branch_id: str) -> Optional[list[MenuItem]]:
+        if self._cache is None or not branch_id:
+            return None
+        generation = str(getattr(self._session, "cache_generation", "") or "") or None
+        try:
+            return await self._cache.get_menu(branch_id, generation=generation)
+        except Exception:
+            logger.warning("Menu cache read failed; falling back to HTTP", exc_info=True)
+            return None
+
+    async def _write_through_menu(self, branch_id: str, items: list[MenuItem]) -> None:
+        if self._cache is None or not branch_id:
+            return
+        try:
+            await self._cache.put_menu(branch_id, items, ttl=self._cache_ttl)
+        except Exception:
+            logger.warning("Menu cache write-through failed", exc_info=True)
 
     async def list_menu(self) -> dict[str, Any]:
         self._mark_order_intent()

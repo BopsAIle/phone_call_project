@@ -151,7 +151,12 @@ class CatalogCache:
 
         decode_responses=True: GET trả str, không phải bytes — khớp json.loads.
         """
-        client = Redis.from_url(url, decode_responses=True)
+        client = Redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
         return cls(client, namespace=namespace, generation_ttl=generation_ttl)
 
     async def connect(self) -> None:
@@ -417,3 +422,23 @@ class CatalogCache:
     def _index_key(self, generation: str) -> str:
         """Key meta đếm số lượng (cho /health), ví dụ aibridge:catalog:g7:index."""
         return self._catalog(generation, "index")
+
+    def _lock_key(self) -> str:
+        """Leader lock giữa nhiều instance: aibridge:sync:lock."""
+        return f"{self._ns}:sync:lock"
+
+    async def try_acquire_writer_lock(self, owner: str, ttl: int = 60) -> bool:
+        """SET NX EX. True = được ghi vòng này. False = instance khác đang ghi, không phải lỗi."""
+        owner = str(owner or "").strip()
+        if not owner:
+            return False
+        ttl = max(int(ttl), 1)
+        key = self._lock_key()
+        acquired = await self._redis.set(key, owner, nx=True, ex=ttl)
+        if acquired:
+            return True
+        current = await self._redis.get(key)
+        if str(current or "") == owner:
+            await self._redis.expire(key, ttl)
+            return True
+        return False

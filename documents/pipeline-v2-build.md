@@ -28,6 +28,8 @@ flowchart TB
   RedisWrite -.-> RedisRead
 ```
 
+
+
 **Thứ tự triển khai**
 
 - Bước 1–3 không chạm cuộc gọi — deploy sớm được.
@@ -36,23 +38,33 @@ flowchart TB
 
 ---
 
+
+
 ## Quyết định khi spec lệch
 
-| Chủ đề | Quyết định |
-| --- | --- |
-| `REDIS_URL` | **Mặc định trống** → không cache, đúng v1. Spec ghi default `redis://…`; ta opt-in bằng env để `python app.py` không phụ thuộc Docker Redis. |
-| Phím sau khi đã tạo đơn | Theo §7.1.8 + §14: phím là tín hiệu ý định, **không** bỏ. Một dòng ở §13.2 nói “bị bỏ” — bỏ dòng đó. |
+
+| Chủ đề                           | Quyết định                                                                                                                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REDIS_URL`                      | **Mặc định trống** → không cache, đúng v1. Spec ghi default `redis://…`; ta opt-in bằng env để `python app.py` không phụ thuộc Docker Redis.         |
+| Phím sau khi đã tạo đơn          | Theo §7.1.8 + §14: phím là tín hiệu ý định, **không** bỏ. Một dòng ở §13.2 nói “bị bỏ” — bỏ dòng đó.                                                 |
 | Endpoint NestJS `/api/v1/sync/*` | Nằm ở `restaurant-backend`, **không** trong plan này. Syncer gặp 404 → `degraded=True`, cache chỉ write-through. Làm Nest sau khi AI Bridge đã chạy. |
-| Test | `fakeredis` / fake in-memory + `httpx.MockTransport`. Không Redis thật, không mạng, không `sleep` dài. |
+| Test                             | `fakeredis` / fake in-memory + `httpx.MockTransport`. Không Redis thật, không mạng, không `sleep` dài.                                               |
+
 
 ---
 
+
+
 ## Checklist theo dõi
+
+
 
 ### Bước 0 — Config
 
 - [ ] Thêm biến §12 vào `config.py` + `.env.example`; `REDIS_URL` default trống
 - [ ] Thêm `redis` và `fakeredis` vào `requirements.txt`
+
+
 
 ### Bước 1 — CatalogCache
 
@@ -61,11 +73,15 @@ flowchart TB
 - [ ] Implement get/put restaurant+menu, `get_version`, `stats`; JSON lỗi trả `None`
 - [ ] Viết `tests/test_catalog_cache.py` (swap, snapshot gen cũ, write-through, JSON hỏng)
 
+
+
 ### Bước 2 — CatalogSyncer
 
 - [ ] Tạo `sync/models.py`: `SyncPayload`, parse + lọc active, normalize hotline, unwrap `data`
 - [ ] Implement `CatalogSyncer`: `warm_once`, `run_forever`, 404 degrade, backoff, lock, `CancelledError`
 - [ ] Viết `tests/test_sync_poller.py` với `MockTransport` (skip ghi, swap, 404, backoff, cancel)
+
+
 
 ### Bước 3 — Lifespan + health
 
@@ -73,11 +89,15 @@ flowchart TB
 - [ ] Mở rộng `GET /health` (block cache) và `POST /internal/sync/refresh`
 - [ ] Test `REDIS_URL` trống/sai và `SYNC_ENABLED=false`: app lên, hành vi v1
 
+
+
 ### Bước 4 — Đọc cache trên cuộc gọi
 
 - [ ] Đổi `_load_catalog` 3 bậc + giữ `cache_generation` trên `CallSession`
 - [ ] `list_menu` / `search_menu` đọc cache trước, miss thì HTTP + write-through
 - [ ] Test cache hit/miss + snapshot isolation session; chạy lại test session/booking/order cũ
+
+
 
 ### Bước 5 — Grace hangup
 
@@ -85,12 +105,16 @@ flowchart TB
 - [ ] Hangup sau câu chốt (`call.end` + grace + close 1000); hủy khi `speech_started`; POST lỗi không cúp
 - [ ] Viết `tests/test_call_end.py` (grace, hủy cúp, không cúp khi lỗi POST)
 
+
+
 ### Bước 6 — Menu phím DTMF (server)
 
 - [ ] Thêm `EVENT_DTMF` / `CALL_END`, `DtmfDigit`, `SERVICE_BY_DIGIT` vào `protocol.py`
 - [ ] `SERVICE_MENU_VI` / `EN` + `ensure_intent_greeting` + `build_system_prompt(service_choice)`; sửa test greeting cũ
 - [ ] `on_dtmf`: barge-in, debounce, `apply_service_choice`, phím sai, timeout sau finish greeting
 - [ ] Viết `tests/test_dtmf.py` đúng checklist §14 (kể phím sau `booking_created`)
+
+
 
 ### Bước 7 — Keypad frontend
 
@@ -100,9 +124,11 @@ flowchart TB
 
 ---
 
+
+
 ## Bước 0 — Config (không đụng runtime)
 
-Thêm field §12 vào [`config.py`](../config.py), [`.env.example`](../.env.example), [`requirements.txt`](../requirements.txt).
+Thêm field §12 vào `[config.py](../config.py)`, `[.env.example](../.env.example)`, `[requirements.txt](../requirements.txt)`.
 
 **Dependencies**
 
@@ -111,29 +137,33 @@ Thêm field §12 vào [`config.py`](../config.py), [`.env.example`](../.env.exam
 
 **Field config**
 
-| Field | Default / giá trị |
-| --- | --- |
-| `redis_url` | `""` |
-| `redis_namespace` | `aibridge` |
-| `sync_enabled` | `true` |
-| `sync_poll_seconds` | `300` |
-| `sync_timeout` | `10` |
-| `sync_api_base` | (env) |
-| `sync_max_backoff_seconds` | `2400` |
-| `cache_generation_ttl` | `10800` |
-| `cache_ttl_seconds` | `600` |
-| `call_end_grace_ms` | `300` |
-| `dtmf_menu_timeout_seconds` | `7` |
-| `dtmf_debounce_ms` | `500` |
-| `dtmf_max_invalid` | `2` |
+
+| Field                       | Default / giá trị |
+| --------------------------- | ----------------- |
+| `redis_url`                 | `""`              |
+| `redis_namespace`           | `aibridge`        |
+| `sync_enabled`              | `true`            |
+| `sync_poll_seconds`         | `300`             |
+| `sync_timeout`              | `10`              |
+| `sync_api_base`             | (env)             |
+| `sync_max_backoff_seconds`  | `2400`            |
+| `cache_generation_ttl`      | `10800`           |
+| `cache_ttl_seconds`         | `600`             |
+| `call_end_grace_ms`         | `300`             |
+| `dtmf_menu_timeout_seconds` | `7`               |
+| `dtmf_debounce_ms`          | `500`             |
+| `dtmf_max_invalid`          | `2`               |
+
 
 `sync_enabled=true` nhưng `redis_url` trống → không tạo cache/syncer, hành vi v1.
 
 ---
 
+
+
 ## Bước 1 — CatalogCache, chưa nối server
 
-File mới: [`cache/redis_store.py`](../cache/redis_store.py).
+File mới: `[cache/redis_store.py](../cache/redis_store.py)`.
 
 **Layout key** (spec §5.5)
 
@@ -142,7 +172,7 @@ File mới: [`cache/redis_store.py`](../cache/redis_store.py).
 - `gN:hotline:…`
 - `gN:menu:…`
 
-Parse ra `Restaurant` / `MenuItem` frozen có sẵn ([`booking/models.py`](../booking/models.py), [`order/models.py`](../order/models.py)).
+Parse ra `Restaurant` / `MenuItem` frozen có sẵn (`[booking/models.py](../booking/models.py)`, `[order/models.py](../order/models.py)`).
 
 **API**
 
@@ -153,7 +183,7 @@ Parse ra `Restaurant` / `MenuItem` frozen có sẵn ([`booking/models.py`](../bo
 
 Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_generation` (bước 4).
 
-**Test** [`tests/test_catalog_cache.py`](../tests/test_catalog_cache.py)
+**Test** `[tests/test_catalog_cache.py](../tests/test_catalog_cache.py)`
 
 - swap + TTL + pointer
 - reader generation cũ còn đủ sau swap
@@ -162,15 +192,17 @@ Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_ge
 
 ---
 
+
+
 ## Bước 2 — CatalogSyncer, chưa nối server
 
-[`sync/models.py`](../sync/models.py): parse `/api/v1/sync/branches`
+`[sync/models.py](../sync/models.py)`: parse `/api/v1/sync/branches`
 
 - unwrap `data`
 - lọc branch/restaurant active
-- normalize hotline — **cùng luật** [`booking/client.py`](../booking/client.py)
+- normalize hotline — **cùng luật** `[booking/client.py](../booking/client.py)`
 
-[`sync/poller.py`](../sync/poller.py)
+`[sync/poller.py](../sync/poller.py)`
 
 - `warm_once`, `run_forever`
 - 404 → degraded + probe lại
@@ -179,13 +211,15 @@ Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_ge
 - `CancelledError` phải `raise`
 - Leader lock §5.9 (`SET NX EX`) — instance không giành được lock thì skip vòng, log DEBUG
 
-**Test** [`tests/test_sync_poller.py`](../tests/test_sync_poller.py) với `httpx.MockTransport`; inject `sleep`.
+**Test** `[tests/test_sync_poller.py](../tests/test_sync_poller.py)` với `httpx.MockTransport`; inject `sleep`.
 
 ---
 
+
+
 ## Bước 3 — Lifespan + health, vẫn chưa đổi `_load_catalog`
 
-[`bridge/server.py`](../bridge/server.py): `lifespan` như §5.2
+`[bridge/server.py](../bridge/server.py)`: `lifespan` như §5.2
 
 - `warm_once` bọc try/timeout
 - Redis connect fail → `catalog_cache=None`
@@ -204,9 +238,11 @@ Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_ge
 
 ---
 
+
+
 ## Bước 4 — Đọc cache trên cuộc gọi (lần đầu chạm hot path)
 
-[`bridge/session.py`](../bridge/session.py) `_load_catalog`
+`[bridge/session.py](../bridge/session.py)` `_load_catalog`
 
 - cache → HTTP `find_by_hotline` + write-through → missing
 - `finally` luôn `catalog_ready` + `refresh_system_prompt`
@@ -215,7 +251,7 @@ Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_ge
 - Copy `list(restaurant.branches)` (đã có trong `apply_restaurant`)
 - Giữ `cache_generation` trên session; `get_menu` sau này dùng generation đó (§9.3)
 
-[`order/tools.py`](../order/tools.py): `list_menu` / `search_menu` cache → HTTP → write-through.
+`[order/tools.py](../order/tools.py)`: `list_menu` / `search_menu` cache → HTTP → write-through.
 
 **Test**
 
@@ -225,9 +261,11 @@ Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_ge
 
 ---
 
+
+
 ## Bước 5 — Grace hangup sau câu chốt
 
-[`turn/barge_in.py`](../turn/barge_in.py) `OutboundGate`
+`[turn/barge_in.py](../turn/barge_in.py)` `OutboundGate`
 
 - `bytes_sent`, `first_frame_at`
 - Helper `remaining_playback_seconds` (32000 byte/s + lead 0.06s + `CALL_END_GRACE_MS`)
@@ -240,19 +278,21 @@ Sau `TurnPlayer.finish()`:
 
 `on_speech_started` (và sau này `on_dtmf`) hủy `_hangup_task`. POST lỗi → không cúp.
 
-**Test** [`tests/test_call_end.py`](../tests/test_call_end.py)
+**Test** `[tests/test_call_end.py](../tests/test_call_end.py)`
 
 ---
 
+
+
 ## Bước 6 — Menu phím DTMF (server)
 
-[`bridge/protocol.py`](../bridge/protocol.py)
+`[bridge/protocol.py](../bridge/protocol.py)`
 
 - `EVENT_DTMF`, `EVENT_CALL_END`
 - `VALID_DTMF_DIGITS`, `SERVICE_BY_DIGIT`, `DtmfDigit`
 - `parse_text_frame` hiểu `dtmf`; digit `"12"` / rỗng → bỏ
 
-[`bridge/session.py`](../bridge/session.py)
+`[bridge/session.py](../bridge/session.py)`
 
 - State: `service_choice`, `awaiting_choice`, `invalid_digit_count`, `last_digit_at`
 - `on_dtmf` **không** return sớm khi `awaiting_choice=False`
@@ -263,21 +303,23 @@ Sau `TurnPlayer.finish()`:
 - Timeout hẹn **sau** `TurnPlayer.finish()` của greeting (+ remaining playback)
 - Transcript khi đang chờ phím **vẫn** chạy
 
-[`llm/stream.py`](../llm/stream.py) + `ensure_intent_greeting`
+`[llm/stream.py](../llm/stream.py)` + `ensure_intent_greeting`
 
 - `SERVICE_MENU_VI` / `_EN` (disclosure trước, mỗi lựa chọn một câu, số ở cuối)
 - `build_system_prompt(..., service_choice=...)` bốn nhánh §7.1.9
 - Cập nhật test greeting cũ (`test_session.py`, `test_aggregator.py`)
 
-**Test** [`tests/test_dtmf.py`](../tests/test_dtmf.py) đúng checklist §14.
+**Test** `[tests/test_dtmf.py](../tests/test_dtmf.py)` đúng checklist §14.
 
 ---
 
+
+
 ## Bước 7 — Keypad frontend
 
-- [`frontend/src/protocol.ts`](../frontend/src/protocol.ts), [`frontend/src/bridge.ts`](../frontend/src/bridge.ts): `sendDtmf`
-- [`frontend/index.html`](../frontend/index.html) + CSS: 3 nút, disable khi chưa gọi
-- [`frontend/src/main.ts`](../frontend/src/main.ts)
+- `[frontend/src/protocol.ts](../frontend/src/protocol.ts)`, `[frontend/src/bridge.ts](../frontend/src/bridge.ts)`: `sendDtmf`
+- `[frontend/index.html](../frontend/index.html)` + CSS: 3 nút, disable khi chưa gọi
+- `[frontend/src/main.ts](../frontend/src/main.ts)`
   - `player.interrupt()` **trước** khi gửi
   - log + status
   - `aria-pressed`
@@ -287,9 +329,12 @@ Sau `TurnPlayer.finish()`:
 
 ---
 
+
+
 ## Ngoài phạm vi plan này
 
 - Endpoint NestJS `/api/v1/sync/check-version` và `/branches` (repo `restaurant-backend`)
 - Celery / nhiều writer
 - Đổi VAD, TTS model, hay wire PCM
 - Đơn món thứ hai trong cùng cuộc gọi (`order_created` vẫn scalar)
+
