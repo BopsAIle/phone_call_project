@@ -55,6 +55,16 @@ const els = {
   orderBannerTitle: $("orderBannerTitle", HTMLElement),
   orderBannerMeta: $("orderBannerMeta", HTMLElement),
   orderBannerItems: $("orderBannerItems", HTMLUListElement),
+  dtmf1: $("dtmf1", HTMLButtonElement),
+  dtmf2: $("dtmf2", HTMLButtonElement),
+  dtmf3: $("dtmf3", HTMLButtonElement),
+};
+
+const keypadButtons = [els.dtmf1, els.dtmf2, els.dtmf3];
+const DTMF_LABELS: Record<string, string> = {
+  "1": "Đặt bàn",
+  "2": "Đến lấy",
+  "3": "Giao hàng",
 };
 
 function $<T extends HTMLElement>(id: string, ctor: { new (): T }): T {
@@ -188,9 +198,18 @@ function setLiveUi(live: boolean): void {
   els.callBtn.disabled = live;
   els.hangBtn.disabled = !live;
   els.muteBtn.disabled = !live;
+  for (const btn of keypadButtons) {
+    btn.disabled = !live;
+  }
   els.wsUrl.disabled = live;
   els.token.disabled = live;
   els.toNumber.disabled = live;
+}
+
+function resetKeypad(): void {
+  for (const btn of keypadButtons) {
+    btn.setAttribute("aria-pressed", "false");
+  }
 }
 
 function healthUrlFromBridge(wsUrl: string): string {
@@ -262,6 +281,7 @@ async function startCall(): Promise<void> {
   muted = false;
   orderPlaced = false;
   hideOrderBanner();
+  resetKeypad();
   els.muteBtn.textContent = "Tắt mic";
   setStatus("Đang xin quyền micro…");
   log("Xin micro");
@@ -377,9 +397,43 @@ async function endCall(closeSocket: boolean): Promise<void> {
   await mic.stop();
   scope.setAnalysers(null, null);
   setLiveUi(false);
+  resetKeypad();
   setStatus("Đã cúp. Nhấn Gọi để bắt đầu lượt mới.");
   log("Cúp máy");
 }
+
+function sendDtmf(digit: string): void {
+  if (!live) return;
+  // Im ngay tại client, không chờ server trả `interrupt` (§7.1.10).
+  player.interrupt();
+  agentSpeaking = false;
+  bridge.sendDtmf(digit);
+  for (const btn of keypadButtons) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.digit === digit));
+  }
+  const label = DTMF_LABELS[digit] || digit;
+  log(`Đã ấn phím ${digit} — ${label}`, "ok");
+  setStatus(`Đã chọn: ${label}`);
+}
+
+for (const btn of keypadButtons) {
+  btn.addEventListener("click", () => {
+    const digit = btn.dataset.digit || "";
+    if (digit) sendDtmf(digit);
+  });
+}
+
+window.addEventListener("keydown", (event) => {
+  if (!live || event.repeat) return;
+  if (event.key !== "1" && event.key !== "2" && event.key !== "3") return;
+  const target = event.target;
+  if (target instanceof HTMLElement) {
+    const tag = target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) return;
+  }
+  event.preventDefault();
+  sendDtmf(event.key);
+});
 
 els.callBtn.addEventListener("click", () => {
   void startCall();

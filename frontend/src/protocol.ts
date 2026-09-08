@@ -10,6 +10,7 @@ export const FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH; // 3200
 export const EVENT_SESSION_INIT = "session.init";
 export const EVENT_INTERRUPT = "interrupt";
 export const EVENT_ORDER_CREATED = "order.created";
+export const EVENT_DTMF = "dtmf";
 
 export type SessionInit = {
   event: typeof EVENT_SESSION_INIT;
@@ -22,6 +23,12 @@ export type SessionInit = {
 };
 
 export type InterruptEvent = { event: typeof EVENT_INTERRUPT };
+
+export type DtmfEvent = {
+  event: typeof EVENT_DTMF;
+  digit: string;
+  callId?: string;
+};
 
 export type OrderCreatedItem = {
   name?: string;

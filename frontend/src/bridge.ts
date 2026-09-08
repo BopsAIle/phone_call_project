@@ -1,4 +1,5 @@
 import {
+  EVENT_DTMF,
   EVENT_INTERRUPT,
   EVENT_ORDER_CREATED,
   EVENT_SESSION_INIT,
@@ -93,6 +94,11 @@ export class BridgeClient {
   sendPcm(frame: ArrayBuffer): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     this.ws.send(frame);
+  }
+
+  sendDtmf(digit: string): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ event: EVENT_DTMF, digit }));
   }
 
   close(code = 1000, reason = "client hangup"): void {

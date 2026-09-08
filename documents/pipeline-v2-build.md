@@ -120,8 +120,8 @@ flowchart TB
 
 ### Bước 7 — Keypad frontend
 
-- [ ] `EVENT_DTMF` + `sendDtmf` trong `protocol.ts` và `bridge.ts`
-- [ ] Keypad 3 nút HTML/CSS/`main.ts`: interrupt local, `aria-pressed`, phím tắt bỏ qua input
+- [x] `EVENT_DTMF` + `sendDtmf` trong `protocol.ts` và `bridge.ts`
+- [x] Keypad 3 nút HTML/CSS/`main.ts`: interrupt local, `aria-pressed`, phím tắt bỏ qua input
 - [ ] Verify browser: ấn 1/2/3 khi đang greeting → im ngay, đúng nhánh; gõ SĐT không bắn DTMF
 
 ---

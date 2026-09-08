@@ -40,6 +40,41 @@
             <button type="button" class="btn hang" id="hangBtn" disabled>Cúp</button>
             <button type="button" class="btn ghost" id="muteBtn" disabled>Tắt mic</button>
           </div>
+          <div class="keypad" id="keypad" role="group" aria-label="Chọn dịch vụ bằng phím">
+            <button
+              type="button"
+              class="btn keypad-btn"
+              id="dtmf1"
+              data-digit="1"
+              disabled
+              aria-pressed="false"
+            >
+              <span class="keypad-digit">1</span>
+              <span class="keypad-label">Đặt bàn</span>
+            </button>
+            <button
+              type="button"
+              class="btn keypad-btn"
+              id="dtmf2"
+              data-digit="2"
+              disabled
+              aria-pressed="false"
+            >
+              <span class="keypad-digit">2</span>
+              <span class="keypad-label">Đến lấy</span>
+            </button>
+            <button
+              type="button"
+              class="btn keypad-btn"
+              id="dtmf3"
+              data-digit="3"
+              disabled
+              aria-pressed="false"
+            >
+              <span class="keypad-digit">3</span>
+              <span class="keypad-label">Giao hàng</span>
+            </button>
+          </div>
           <label class="vol">
             <span>Âm lượng agent</span>
             <input type="range" id="volume" min="0" max="1" step="0.05" value="1" />
