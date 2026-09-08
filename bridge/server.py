@@ -162,7 +162,17 @@ def create_app(
 
         if syncer is not None:
             try:
-                await asyncio.wait_for(syncer.warm_once(), timeout=settings.sync_timeout)
+                ok = await asyncio.wait_for(syncer.warm_once(), timeout=settings.sync_timeout)
+                if ok:
+                    logger.info(
+                        "Catalog cache ready version=%s",
+                        getattr(syncer, "version", "") or "",
+                    )
+                else:
+                    logger.warning(
+                        "Catalog cache warm did not complete: %s",
+                        getattr(syncer, "last_sync_error", None) or "unknown",
+                    )
             except Exception:
                 logger.exception("Cache warm-up failed; continuing in degrade mode")
             task = asyncio.create_task(syncer.run_forever(), name="catalog-sync")

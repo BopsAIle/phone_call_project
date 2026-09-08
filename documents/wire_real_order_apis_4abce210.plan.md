@@ -4,19 +4,19 @@ overview: Khóa chi nhánh từ hotline cuộc gọi trước, rồi GET `/menu/
 todos:
   - id: client-http
     content: Đổi OrderClient sang GET /menu/branch/{id} và POST /menu/delivery/ai | /menu/takeout/ai; parse status/quantity; map DTO
-    status: pending
+    status: completed
   - id: branch-first
     content: Bắt buộc khóa branch_id từ catalog hotline trước menu/đơn; 1 chi nhánh tự khóa; nhiều chi nhánh thì AI hỏi rồi resolve_branch/confirm_branch
-    status: pending
+    status: completed
   - id: tools-session
     content: _ensure_menu/create_order fail nếu chưa có branch; reset menu/cart khi đổi branch; create_order thu booking_date/time
-    status: pending
+    status: completed
   - id: prompt-docs
     content: Prompt hỏi chi nhánh trước khi search_menu; cập nhật order-api-contract.md + ai-pipeline.md
-    status: pending
+    status: completed
   - id: tests
     content: Test hotline→hỏi chi nhánh→GET menu/POST đơn dùng branch_id đã khóa; viết lại test client
-    status: pending
+    status: completed
 isProject: false
 ---
 

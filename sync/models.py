@@ -1,8 +1,9 @@
-"""Parse GET /api/v1/sync/branches into restaurant + menu snapshots."""
-## sync/models.py : nhiệm vụ là biến JSON thô từ backend thành cấu trúc sẵn sàng nhét vào Redis
+"""Parse restaurant + branch + menu snapshots for Redis catalog cache."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,21 +17,16 @@ from order.models import MenuItem
 
 @dataclass(frozen=True)
 class SyncPayload:
-    """Kết quả parse /api/v1/sync/branches, sẵn sàng đưa vào CatalogCache."""
+    """Snapshot sẵn sàng đưa vào CatalogCache."""
 
-    #version: version của dữ liệu
     version: str
-    # Dictionary tra cứu từ sđt -> Restaurant. Cuộc gọi đến số nào thì biết ngay nhà hàng nào 
     by_hotline: Mapping[str, Restaurant]
-    #menus: thực đơn của từng chi nhánh . Dạng dictionary branch_id -> list[MenuItem]
     menus: Mapping[str, Sequence[MenuItem]] = field(default_factory=dict)
 
     def to_generation(self) -> GenerationPayload:
         return GenerationPayload(by_hotline=self.by_hotline, menus=self.menus)
 
-## Nhận field hotline từ JSON thô và chuyển thành list sđt đã chuẩn hóa 
-#-> Chuẩn hóa sđt
-#Backend gửi hotline rất tuỳ tiện — có nơi "0912-345-678", có nơi "+84912345678"-> _as_hotline_list chuyển thành list sđt đã chuẩn hóa
+
 def _as_hotline_list(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -50,7 +46,25 @@ def _as_hotline_list(raw: Any) -> list[str]:
         digits.append(key)
     return digits
 
-# parse phần "menus" của một nhà hàng (JSON dạng { branch_id: [menu items] }) thành dict[branch_id → list[MenuItem]]
+
+def _as_mapping_list(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
+def _branch_restaurant_id(branch: dict[str, Any]) -> str:
+    rid = str(branch.get("restaurant_id") or "").strip()
+    if rid:
+        return rid
+    nested = branch.get("restaurant")
+    if isinstance(nested, dict):
+        return str(nested.get("id") or "").strip()
+    return ""
+
+
 def _menus_for_restaurant(item: dict[str, Any], restaurant: Restaurant) -> dict[str, list[MenuItem]]:
     raw_menus = item.get("menus")
     if not isinstance(raw_menus, dict):
@@ -74,17 +88,61 @@ def _menus_for_restaurant(item: dict[str, Any], restaurant: Restaurant) -> dict[
         menus[branch_id] = parsed
     return menus
 
-"""
-1.unwrap_data(raw) — backend gói dữ liệu trong { "data": {...} }; hàm này bóc ra. JSON không phải object → return None (Syncer sẽ coi là fetch_failed).
-2.Đọc version — dùng để so sánh với cache lần sau.
-3.Duyệt từng restaurant:
-      restaurant_from_api(item) — parse + tự động lọc branch inactive (comment ở docstring nói rõ).
-      Bỏ luôn nhà hàng status != "active".
-      Ghép hotline: hotlines khai báo + trường phone chính → merge lại (không trùng).
-      Mọi hotline đều trỏ đến cùng một Restaurant — nên cuộc gọi vào số nào của nhà hàng đó cũng lookup được.
-4.Gom menus từ _menus_for_restaurant.
-5.Đóng gói thành SyncPayload.
-"""
+
+def catalog_version(
+    restaurants: Sequence[dict[str, Any]],
+    branches: Sequence[dict[str, Any]],
+    menus: Mapping[str, Sequence[Any]],
+) -> str:
+    """Hash ổn định từ list NestJS — thay cho /api/v1/sync/check-version."""
+    rest = sorted(
+        (
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "phone": str(item.get("phone") or ""),
+                "status": str(item.get("status") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in restaurants
+        ),
+        key=lambda row: row["id"],
+    )
+    branch_fp = sorted(
+        (
+            {
+                "id": str(item.get("id") or ""),
+                "restaurant_id": _branch_restaurant_id(item),
+                "name": str(item.get("name") or ""),
+                "status": str(item.get("status") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in branches
+        ),
+        key=lambda row: row["id"],
+    )
+    menu_fp = {
+        str(branch_id): [
+            {
+                "id": str(item.get("id") or item.get("menu_item_id") or ""),
+                "name": str(item.get("name") or ""),
+                "price": item.get("price"),
+                "status": str(item.get("status") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+        for branch_id, items in sorted(menus.items(), key=lambda pair: str(pair[0]))
+    }
+    blob = json.dumps(
+        {"b": branch_fp, "m": menu_fp, "r": rest},
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
 
 def parse_sync_payload(raw: Any) -> SyncPayload | None:
     """Unwrap `data`, lọc restaurant/branch active, normalize hotline.
@@ -118,3 +176,58 @@ def parse_sync_payload(raw: Any) -> SyncPayload | None:
             by_hotline[digits] = restaurant
         menus.update(_menus_for_restaurant(item, restaurant))
     return SyncPayload(version=version, by_hotline=by_hotline, menus=menus)
+
+
+def _records(raw: Any) -> list[dict[str, Any]]:
+    return _as_mapping_list(unwrap_data(raw))
+
+
+def assemble_catalog(
+    restaurants: Any,
+    branches: Any,
+    menus: Mapping[str, Any] | None = None,
+) -> SyncPayload:
+    """Ghép GET /restaurants + GET /branches + GET /menu/branch/{id} thành snapshot Redis.
+
+    Nest không bọc branches/menus trong từng restaurant — list riêng, gắn theo id.
+    """
+    rest_list = _records(restaurants)
+    branch_list = _records(branches)
+
+    menu_map: dict[str, list[dict[str, Any]]] = {}
+    for bid, items in (menus or {}).items():
+        key = str(bid or "").strip()
+        if not key:
+            continue
+        menu_map[key] = _as_mapping_list(items)
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in rest_list:
+        rid = str(item.get("id") or "").strip()
+        if not rid:
+            continue
+        packed = dict(item)
+        packed["branches"] = []
+        packed["menus"] = {}
+        by_id[rid] = packed
+
+    for branch in branch_list:
+        rid = _branch_restaurant_id(branch)
+        nested = branch.get("restaurant")
+        if rid and rid not in by_id and isinstance(nested, dict) and nested.get("id"):
+            packed = dict(nested)
+            packed["branches"] = []
+            packed["menus"] = {}
+            by_id[rid] = packed
+        if not rid or rid not in by_id:
+            continue
+        by_id[rid]["branches"].append(branch)
+        bid = str(branch.get("id") or "").strip()
+        if bid and bid in menu_map:
+            by_id[rid]["menus"][bid] = menu_map[bid]
+
+    version = catalog_version(rest_list, branch_list, menu_map)
+    parsed = parse_sync_payload({"version": version, "restaurants": list(by_id.values())})
+    if parsed is None:
+        return SyncPayload(version=version, by_hotline={}, menus={})
+    return parsed
