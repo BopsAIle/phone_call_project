@@ -28,6 +28,13 @@ export const BookingList: React.FC<BookingListProps> = ({ onEdit }) => {
 
   const columns = [
     {
+      title: 'Mã đơn',
+      dataIndex: 'order_code',
+      key: 'order_code',
+      width: 130,
+      render: (code: string) => code || 'NA',
+    },
+    {
       title: 'Nhà hàng',
       dataIndex: ['restaurant', 'name'],
       key: 'restaurant_name',

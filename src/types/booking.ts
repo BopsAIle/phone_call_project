@@ -44,6 +44,7 @@ export interface Booking {
   id: string
   branch_id: string
   restaurant_id: string
+  order_code?: string
   customer_name: string
   phone_number: string
   party_size: number
