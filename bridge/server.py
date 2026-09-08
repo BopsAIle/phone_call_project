@@ -278,6 +278,9 @@ def create_app(
             catalog_cache=getattr(app.state, "catalog_cache", None),
             cache_ttl=settings.cache_ttl_seconds,
             call_end_grace_ms=settings.call_end_grace_ms,
+            dtmf_menu_timeout_seconds=settings.dtmf_menu_timeout_seconds,
+            dtmf_debounce_ms=settings.dtmf_debounce_ms,
+            dtmf_max_invalid=settings.dtmf_max_invalid,
         )
         try:
             await pipeline.run()

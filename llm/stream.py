@@ -18,6 +18,19 @@ FALLBACK_PHRASES = {
 }
 _MAX_TOOL_ROUNDS = 12
 
+SERVICE_MENU_VI = (
+    "Để đặt bàn, bạn ấn phím 1. "
+    "Để đặt đồ ăn rồi đến lấy, bạn ấn phím 2. "
+    "Để đặt đồ ăn giao tận nơi, bạn ấn phím 3."
+)
+SERVICE_MENU_EN = (
+    "To book a table, press 1. "
+    "To order food for pickup, press 2. "
+    "To order food for delivery, press 3."
+)
+INVALID_MENU_VI = "Dạ mình chưa nhận được. Đặt bàn ấn 1, đến lấy ấn 2, giao tận nơi ấn 3 ạ."
+INVALID_MENU_EN = "Sorry, I didn't catch that. Press 1 for a table, 2 for pickup, 3 for delivery."
+
 
 def fallback_phrase(locale: str) -> str:
     return FALLBACK_PHRASES.get((locale or "en").lower()[:2], FALLBACK_PHRASES["en"])
@@ -76,6 +89,8 @@ def build_system_prompt(
     delivery_address: str = "",
     menu_ready: bool = False,
     order_status: str = "",
+    service_choice: str = "",
+    awaiting_choice: bool = False,
 ) -> str:
     tz_name, now = _now_in_zone(timezone)
     lang = locale or "en"
@@ -102,15 +117,36 @@ def build_system_prompt(
         )
         return " ".join(parts)
 
-    if not intent:
+    if service_choice == "1":
         parts.append(
-            "Sau câu chào, nếu khách chưa nói rõ muốn gì, hỏi một câu: "
-            "bạn muốn đặt bàn hay mang về. "
-            "Đặt bàn là giữ chỗ tại quán. Mang về là đặt món để lấy tại quán. "
-            "Nếu họ nói giao hàng hoặc ship thì nhận đơn giao hàng. "
-            "Suy ra từ lời họ nếu đã đủ rõ; không hỏi lại khi họ đã chọn. "
-            "Chưa rõ ý định thì chưa hỏi tên, số điện thoại, món, hay chi tiết khác."
+            "Khách đã chọn đặt bàn bằng phím 1. Không hỏi lại loại dịch vụ. "
+            "Đi thẳng vào bước tiếp theo."
         )
+    elif service_choice == "2":
+        parts.append(
+            "Khách đã chọn đặt đồ ăn đến lấy bằng phím 2. Không hỏi lại loại dịch vụ. "
+            "Đi thẳng vào bước tiếp theo."
+        )
+    elif service_choice == "3":
+        parts.append(
+            "Khách đã chọn đặt đồ ăn giao tận nơi bằng phím 3. Không hỏi lại loại dịch vụ. "
+            "Đi thẳng vào bước tiếp theo."
+        )
+    elif not intent:
+        if awaiting_choice:
+            parts.append(
+                "Khách đang nghe menu phím. Nếu khách nói thay vì ấn phím, "
+                "suy ra dịch vụ từ lời họ và tiếp tục."
+            )
+        else:
+            parts.append(
+                "Sau câu chào, nếu khách chưa nói rõ muốn gì, hỏi một câu: "
+                "bạn muốn đặt bàn hay mang về. "
+                "Đặt bàn là giữ chỗ tại quán. Mang về là đặt món để lấy tại quán. "
+                "Nếu họ nói giao hàng hoặc ship thì nhận đơn giao hàng. "
+                "Suy ra từ lời họ nếu đã đủ rõ; không hỏi lại khi họ đã chọn. "
+                "Chưa rõ ý định thì chưa hỏi tên, số điện thoại, món, hay chi tiết khác."
+            )
     parts.append(
         "Nếu họ đổi ý trước khi bàn hoặc đơn được tạo, làm theo yêu cầu mới và "
         "không gọi công cụ create của yêu cầu đã bỏ."
@@ -225,6 +261,8 @@ def build_system_prompt(
             "Bỏ qua mục đã có. Mỗi khi khách nêu tên, SĐT, ngày, giờ, ghi chú, hoặc SĐT nhận: "
             "gọi save_order_details ngay."
         )
+        if fulfillment in {"pickup", "delivery"}:
+            parts.append("Không hỏi lại giao hàng hay mang về.")
         parts.append(
             "Giao hàng: gọi set_fulfillment với delivery và địa chỉ nói miệng (bắt buộc). "
             "Thu tên người đặt, số điện thoại người đặt, ngày giao (YYYY-MM-DD theo múi giờ "
@@ -261,6 +299,18 @@ def build_system_prompt(
             parts.append(order_status)
 
     return " ".join(parts)
+
+
+def split_spoken_sentences(text: str) -> list[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    aggregator = SentenceAggregator()
+    sentences = aggregator.push(text)
+    remainder = aggregator.flush()
+    if remainder:
+        sentences.append(remainder)
+    return sentences
 
 
 class SentenceAggregator:

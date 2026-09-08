@@ -127,6 +127,48 @@ def test_system_prompt_asks_booking_or_takeaway_when_intent_unknown() -> None:
     )
     assert "bạn muốn đặt bàn hay mang về" in prompt
     assert "Không mở đầu bằng câu hỏi lựa chọn" not in prompt
+    assert "menu phím" not in prompt
+
+
+def test_system_prompt_awaiting_dtmf_does_not_ask_verbally() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        awaiting_choice=True,
+    )
+    assert "đang nghe menu phím" in prompt
+    assert "nếu khách chưa nói rõ muốn gì" not in prompt
+
+
+def test_system_prompt_after_dtmf_booking_skips_service_question() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        catalog_loaded=True,
+        intent="booking",
+        service_choice="1",
+    )
+    assert "phím 1" in prompt
+    assert "Không hỏi lại loại dịch vụ" in prompt
+    assert "nếu khách chưa nói rõ muốn gì" not in prompt
+    assert "bạn muốn đặt bàn hay mang về" not in prompt
+
+
+def test_system_prompt_dtmf_pickup_does_not_reask_fulfillment() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        catalog_loaded=True,
+        intent="order",
+        service_choice="2",
+        fulfillment="pickup",
+    )
+    assert "phím 2" in prompt
+    assert "Không hỏi lại giao hàng hay mang về" in prompt
+    assert "Hình thức: đến lấy tại chi nhánh" in prompt
 
 
 def test_system_prompt_does_not_reask_intent_when_booking() -> None:

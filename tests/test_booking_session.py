@@ -140,7 +140,7 @@ async def test_tool_loop_speaks_sentence_not_tool_payload() -> None:
             break
         await asyncio.sleep(0.02)
     assert spoken in tts.spoken
-    assert INIT["greeting"] in tts.spoken
+    assert INIT["greeting"] in " ".join(tts.spoken)
     for line in tts.spoken:
         assert "phone_ai" not in line
         assert "should-be-ignored" not in line

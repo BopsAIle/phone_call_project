@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -14,8 +15,22 @@ from audio.resample import BRIDGE_RATE, OPENAI_RATE, StreamResampler, even_pcm16
 from booking.client import normalize_hotline
 from booking.models import Branch, Restaurant
 from booking.tools import BOOKING_TOOL_NAMES, BOOKING_TOOLS, BookingTools
-from bridge.protocol import EVENT_CALL_END, EVENT_ORDER_CREATED
-from llm.stream import build_system_prompt, fallback_phrase
+from bridge.protocol import (
+    EVENT_CALL_END,
+    EVENT_DTMF,
+    EVENT_ORDER_CREATED,
+    SERVICE_BY_DIGIT,
+    VALID_DTMF_DIGITS,
+)
+from llm.stream import (
+    INVALID_MENU_EN,
+    INVALID_MENU_VI,
+    SERVICE_MENU_EN,
+    SERVICE_MENU_VI,
+    build_system_prompt,
+    fallback_phrase,
+    split_spoken_sentences,
+)
 from order.models import CartLine, MenuItem
 from order.tools import ORDER_TOOL_NAMES, ORDER_TOOLS, OrderTools, order_status_prompt
 from turn.barge_in import OutboundGate, abort_and_interrupt, remaining_playback_seconds
@@ -25,22 +40,52 @@ logger = logging.getLogger(__name__)
 # ~2 s of 24 kHz PCM16 if STT is still connecting
 _MAX_PENDING_STT_BYTES = BRIDGE_RATE * 2 * 3  # 16k→24k ≈ 3/2, times 2 bytes, ~2 s
 
-INTENT_QUESTION_VI = "Bạn muốn đặt bàn hay mang về ạ?"
+_DTMF_USER_TEXT = {
+    "vi": {
+        "1": "Tôi ấn phím 1, đặt bàn.",
+        "2": "Tôi ấn phím 2, đặt đồ ăn đến lấy.",
+        "3": "Tôi ấn phím 3, đặt đồ ăn giao tận nơi.",
+    },
+    "en": {
+        "1": "I pressed 1, book a table.",
+        "2": "I pressed 2, order for pickup.",
+        "3": "I pressed 3, order for delivery.",
+    },
+}
+
+
+def _menu_for_locale(locale: str) -> str:
+    lang = (locale or "").lower()[:2]
+    if lang == "vi":
+        return SERVICE_MENU_VI
+    if lang == "en":
+        return SERVICE_MENU_EN
+    return ""
+
+
+def greeting_has_service_menu(text: str, locale: str) -> bool:
+    lowered = (text or "").casefold()
+    lang = (locale or "").lower()[:2]
+    if lang == "vi":
+        return "ấn phím 1" in lowered or "phím 1" in lowered
+    if lang == "en":
+        return "press 1" in lowered
+    return False
 
 
 def ensure_intent_greeting(greeting: str, locale: str) -> str:
-    """Keep the backend greeting, and make sure Vietnamese calls offer the two choices."""
+    """Keep the backend greeting, and append the DTMF service menu when missing."""
     text = (greeting or "").strip()
-    if (locale or "").lower()[:2] != "vi":
+    menu = _menu_for_locale(locale)
+    if not menu:
         return text
-    lowered = text.casefold()
-    if "đặt bàn" in lowered and "mang về" in lowered:
+    if greeting_has_service_menu(text, locale):
         return text
     if not text:
-        return INTENT_QUESTION_VI
+        return menu
     if text[-1] in ".!?…":
-        return f"{text} {INTENT_QUESTION_VI}"
-    return f"{text}. {INTENT_QUESTION_VI}"
+        return f"{text} {menu}"
+    return f"{text}. {menu}"
 
 
 class CallState(str, Enum):
@@ -90,6 +135,11 @@ class CallSession:
     order_note: str = ""
     order_created: bool = False
     cache_generation: str = ""
+    service_choice: str = ""
+    awaiting_choice: bool = False
+    invalid_digit_count: int = 0
+    last_digit_at: float = 0.0
+    last_dtmf_digit: str = ""
 
     def cart_summary_text(self) -> str:
         parts: list[str] = []
@@ -141,6 +191,7 @@ class CallSession:
         self.greeting = ensure_intent_greeting(str(payload.get("greeting") or ""), self.locale)
         self.to_number = normalize_hotline(str(payload.get("toNumber") or payload.get("to") or ""))
         self.inited = True
+        self.awaiting_choice = greeting_has_service_menu(self.greeting, self.locale)
         self.history = []
         if self.greeting.strip():
             self.history.append({"role": "assistant", "content": self.greeting})
@@ -163,6 +214,8 @@ class CallSession:
             delivery_address=self.delivery_address,
             menu_ready=self.menu_ready,
             order_status="" if self.order_created else order_status_prompt(self),
+            service_choice=self.service_choice,
+            awaiting_choice=self.awaiting_choice,
         )
         if self.history and self.history[0].get("role") == "system":
             self.history[0]["content"] = content
@@ -191,6 +244,22 @@ class CallSession:
                 self.refresh_system_prompt()
                 return branch
         return None
+
+    def apply_service_choice(self, digit: str) -> bool:
+        mapped = SERVICE_BY_DIGIT.get(digit)
+        if mapped is None:
+            return False
+        intent, fulfillment = mapped
+        previous_intent = self.intent
+        self.service_choice = digit
+        self.intent = intent
+        self.fulfillment = fulfillment
+        self.awaiting_choice = False
+        self.invalid_digit_count = 0
+        if previous_intent == "order" and intent == "booking":
+            self.cart = []
+        self.refresh_system_prompt()
+        return True
 
     @property
     def tag(self) -> str:
@@ -306,7 +375,10 @@ class CallPipeline:
         menu_matcher: Any = None,
         catalog_cache: Any = None,
         cache_ttl: int = 600,
-        call_end_grace_ms: int = 300, ## Tham số này được mặc địng cộng thêm thêmvafo thời gian chờ trước khi cúp máy
+        call_end_grace_ms: int = 300, #Tham số này mặc định cộng thêm vào thời gian chờ khi kết thúc cuộc gọi
+        dtmf_menu_timeout_seconds: int = 7,
+        dtmf_debounce_ms: int = 500,
+        dtmf_max_invalid: int = 2,
     ) -> None:
         self.websocket = websocket
         self.stt = stt
@@ -316,6 +388,9 @@ class CallPipeline:
         self._cache = catalog_cache
         self._cache_ttl = max(int(cache_ttl), 1)
         self._call_end_grace_ms = max(int(call_end_grace_ms), 0)
+        self._dtmf_menu_timeout_seconds = max(int(dtmf_menu_timeout_seconds), 0)
+        self._dtmf_debounce_ms = max(int(dtmf_debounce_ms), 0)
+        self._dtmf_max_invalid = max(int(dtmf_max_invalid), 0)
         self.session = CallSession()
         self._booking = (
             BookingTools(self.session, restaurant_client, matcher) if restaurant_client is not None else None
@@ -342,7 +417,9 @@ class CallPipeline:
         self._stt_start_task: Optional[asyncio.Task[None]] = None
         self._catalog_task: Optional[asyncio.Task[None]] = None
         self._hangup_task: Optional[asyncio.Task[None]] = None
+        self._menu_timeout_task: Optional[asyncio.Task[None]] = None
         self._created_this_turn = False
+        self._create_in_flight = False
         self._shutting_down = False
 
     async def run(self) -> None:
@@ -418,6 +495,10 @@ class CallPipeline:
             logger.warning("Ignoring non-object inbound JSON %s", self.session.tag)
             return
         event = payload.get("event")
+        if event == EVENT_DTMF:
+            if self.session.inited:
+                await self.on_dtmf(payload)
+            return
         if event != "session.init":
             logger.warning("Ignoring unknown control event %r %s", event, self.session.tag)
             return
@@ -526,8 +607,11 @@ class CallPipeline:
         player = TurnPlayer(self.session, self.outbound, self.tts, self.session.locale)
         self._player = player
         try:
-            await player.speak_sentence(self.session.greeting)
+            for sentence in split_spoken_sentences(self.session.greeting):
+                await player.speak_sentence(sentence)
             await player.finish()
+            if not player.should_abort() and self.session.awaiting_choice:
+                self._schedule_menu_timeout()
         except asyncio.CancelledError:
             await player.abort()
             raise
@@ -563,6 +647,11 @@ class CallPipeline:
         async with self._turn_lock:
             if self.session.closed:
                 return
+            spoken = (text or "").strip()
+            if self.session.awaiting_choice and spoken:
+                self.session.awaiting_choice = False
+                await self._cancel_menu_timeout()
+                self.session.refresh_system_prompt()
             busy = (
                 self.session.state in (CallState.GREETING, CallState.THINKING, CallState.SPEAKING)
                 or self.session.playing
@@ -573,17 +662,24 @@ class CallPipeline:
             self._spawn(self._run_reply(text))
 
     async def _execute_tool(self, name: str, arguments_json: str) -> str:
-        if name in BOOKING_TOOL_NAMES and self._booking is not None:
-            result = await self._booking.execute(name, arguments_json)
-            self._note_created_this_turn(name, result)
-            return result
-        if name in ORDER_TOOL_NAMES and self._order is not None:
-            result = await self._order.execute(name, arguments_json)
-            self._note_created_this_turn(name, result)
-            if name == "create_order":
-                await self._notify_order_created(result)
-            return result
-        return json.dumps({"ok": False, "error": "unknown_tool"})
+        creating = name in {"create_booking", "create_order"}
+        if creating:
+            self._create_in_flight = True
+        try:
+            if name in BOOKING_TOOL_NAMES and self._booking is not None:
+                result = await self._booking.execute(name, arguments_json)
+                self._note_created_this_turn(name, result)
+                return result
+            if name in ORDER_TOOL_NAMES and self._order is not None:
+                result = await self._order.execute(name, arguments_json)
+                self._note_created_this_turn(name, result)
+                if name == "create_order":
+                    await self._notify_order_created(result)
+                return result
+            return json.dumps({"ok": False, "error": "unknown_tool"})
+        finally:
+            if creating:
+                self._create_in_flight = False
 
     def _note_created_this_turn(self, name: str, raw_result: str) -> None:
         if name not in {"create_booking", "create_order"}:
@@ -731,6 +827,119 @@ class CallPipeline:
 
         await abort_and_interrupt(session=self.session, outbound=self.outbound, abort_work=abort_work)
 
+    def _dtmf_user_text(self, digit: str) -> str:
+        lang = (self.session.locale or "en").lower()[:2]
+        table = _DTMF_USER_TEXT.get(lang) or _DTMF_USER_TEXT["en"]
+        return table.get(digit, "")
+
+    def _schedule_menu_timeout(self) -> None:
+        task = self._menu_timeout_task
+        if task is not None and not task.done():
+            task.cancel()
+        delay = remaining_playback_seconds(self.outbound, 0) + self._dtmf_menu_timeout_seconds
+        self._menu_timeout_task = asyncio.create_task(self._on_menu_timeout(delay), name="dtmf-timeout")
+
+    async def _cancel_menu_timeout(self) -> None:
+        task = self._menu_timeout_task
+        if task is None or task.done():
+            self._menu_timeout_task = None
+            return
+        task.cancel()
+        self._menu_timeout_task = None
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _on_menu_timeout(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        if self.session.closed or not self.session.awaiting_choice:
+            return
+        self.session.awaiting_choice = False
+        self.session.refresh_system_prompt()
+        logger.info("DTMF menu timeout %s", self.session.tag)
+
+    async def on_dtmf(self, payload: dict[str, Any]) -> None:
+        await self._cancel_hangup()
+        digit = str(payload.get("digit") or "")
+        if digit not in VALID_DTMF_DIGITS:
+            logger.warning("Ignoring invalid dtmf digit=%r %s", digit, self.session.tag)
+            return
+        if self._create_in_flight:
+            logger.info("Ignoring dtmf during create %s digit=%s", self.session.tag, digit)
+            return
+        now = time.monotonic()
+        if (
+            digit == self.session.last_dtmf_digit
+            and self.session.last_digit_at
+            and (now - self.session.last_digit_at) * 1000 < self._dtmf_debounce_ms
+        ):
+            return
+        self.session.last_digit_at = now
+        self.session.last_dtmf_digit = digit
+        logger.info("dtmf digit=%s %s", digit, self.session.tag)
+
+        if digit not in SERVICE_BY_DIGIT:
+            self.session.invalid_digit_count += 1
+            if not self.session.awaiting_choice:
+                return
+            if self.session.invalid_digit_count <= self._dtmf_max_invalid:
+                async with self._turn_lock:
+                    if self.session.closed:
+                        return
+                    if (
+                        self.session.state in (CallState.GREETING, CallState.THINKING, CallState.SPEAKING)
+                        or self.session.playing
+                        or (self._work_task is not None and not self._work_task.done())
+                    ):
+                        await self._barge_in()
+                    self._spawn(self._speak_invalid_menu())
+                return
+            self.session.awaiting_choice = False
+            await self._cancel_menu_timeout()
+            self.session.refresh_system_prompt()
+            return
+
+        await self._cancel_menu_timeout()
+        async with self._turn_lock:
+            if self.session.closed:
+                return
+            if (
+                self.session.state in (CallState.GREETING, CallState.THINKING, CallState.SPEAKING)
+                or self.session.playing
+                or (self._work_task is not None and not self._work_task.done())
+            ):
+                await self._barge_in()
+            self.session.apply_service_choice(digit)
+            hint = self._dtmf_user_text(digit)
+            if hint:
+                self._spawn(self._run_reply(hint))
+
+    async def _speak_invalid_menu(self) -> None:
+        lang = (self.session.locale or "en").lower()[:2]
+        text = INVALID_MENU_VI if lang == "vi" else INVALID_MENU_EN
+        self.session.begin_generation()
+        self.session.state = CallState.SPEAKING
+        player = TurnPlayer(self.session, self.outbound, self.tts, self.session.locale)
+        self._player = player
+        try:
+            await player.speak_sentence(text)
+            await player.finish()
+        except asyncio.CancelledError:
+            await player.abort()
+            raise
+        except Exception:
+            logger.exception("Invalid DTMF menu TTS failed %s", self.session.tag)
+            if self.session.generation_id == player.generation_id:
+                self.session.playing = False
+                self.session.state = CallState.LISTENING
+        finally:
+            if self._player is player:
+                self._player = None
+
     def _spoke_closing_sentence(self) -> bool:
         last = self.session.history[-1] if self.session.history else None
         return bool(last and last.get("role") == "assistant" and str(last.get("content") or "").strip())
@@ -801,6 +1010,14 @@ class CallPipeline:
             except (asyncio.CancelledError, Exception):
                 pass
             self._hangup_task = None
+        menu_timeout = self._menu_timeout_task
+        if menu_timeout is not None and not menu_timeout.done() and menu_timeout is not asyncio.current_task():
+            menu_timeout.cancel()
+            try:
+                await menu_timeout
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._menu_timeout_task = None
         self.session.closed = True
         self.session.state = CallState.CLOSED
         self.session.playing = False

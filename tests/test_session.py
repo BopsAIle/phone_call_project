@@ -4,7 +4,7 @@ import asyncio
 import json
 
 from bridge.session import CallPipeline, CallState, ensure_intent_greeting
-from llm.stream import fallback_phrase
+from llm.stream import SERVICE_MENU_VI, fallback_phrase
 from tests.fakes import FakeBridgeSocket, FakeSTT, ScriptedLlm, ScriptedTts, SlowTts
 
 INIT = {
@@ -29,26 +29,32 @@ async def _stop(ws, task) -> None:
     await asyncio.wait_for(task, timeout=2)
 
 
-def test_ensure_intent_greeting_keeps_english_verbatim() -> None:
-    greeting = INIT["greeting"]
-    assert ensure_intent_greeting(greeting, "en") == greeting
+def test_ensure_intent_greeting_appends_english_menu() -> None:
+    spoken = ensure_intent_greeting(INIT["greeting"], "en")
+    assert spoken.startswith(INIT["greeting"])
+    assert "press 1" in spoken.casefold()
+    assert "press 2" in spoken.casefold()
+    assert "press 3" in spoken.casefold()
 
 
-def test_ensure_intent_greeting_appends_vietnamese_choice() -> None:
+def test_ensure_intent_greeting_appends_vietnamese_menu() -> None:
     spoken = ensure_intent_greeting(
         "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động.",
         "vi",
     )
-    assert spoken.endswith("Bạn muốn đặt bàn hay mang về ạ?")
     assert spoken.startswith("Xin chào")
+    assert spoken.endswith(SERVICE_MENU_VI)
+    assert "ấn phím 1" in spoken
 
 
-def test_ensure_intent_greeting_does_not_duplicate_choice() -> None:
+def test_ensure_intent_greeting_does_not_duplicate_menu() -> None:
     greeting = (
         "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. "
-        "Bạn muốn đặt bàn hay mang về ạ?"
+        + SERVICE_MENU_VI
     )
     assert ensure_intent_greeting(greeting, "vi") == greeting
+    english = ensure_intent_greeting(INIT["greeting"], "en")
+    assert ensure_intent_greeting(english, "en") == english
 
 
 async def test_vietnamese_init_speaks_booking_or_takeaway() -> None:
@@ -65,10 +71,12 @@ async def test_vietnamese_init_speaks_booking_or_takeaway() -> None:
         )
     )
     await asyncio.sleep(0.1)
-    assert tts.spoken == [
-        "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. "
-        "Bạn muốn đặt bàn hay mang về ạ?"
-    ]
+    spoken = " ".join(tts.spoken)
+    assert "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động." in spoken
+    assert "ấn phím 1" in spoken
+    assert "ấn phím 2" in spoken
+    assert "ấn phím 3" in spoken
+    assert pipeline.session.awaiting_choice is True
     await _stop(ws, task)
 
 
@@ -77,13 +85,15 @@ async def test_greeting_speaks_verbatim_and_sends_pcm() -> None:
     tts = ScriptedTts()
     pipeline, task = await _start_pipeline(ws, FakeSTT(), ScriptedLlm([]), tts)
     await ws.push_text(json.dumps(INIT))
-    await asyncio.sleep(0.1)
-    assert tts.spoken == [INIT["greeting"]]
+    await asyncio.sleep(0.15)
+    expected = ensure_intent_greeting(INIT["greeting"], "en")
+    assert " ".join(tts.spoken) == expected
     assert any(kind == "bytes" for kind, _ in ws.sent)
     assert pipeline.session.state == CallState.LISTENING
     assert pipeline.session.generation_id == 1
+    assert pipeline.session.awaiting_choice is True
     assistant = [m for m in pipeline.session.history if m["role"] == "assistant"]
-    assert assistant == [{"role": "assistant", "content": INIT["greeting"]}]
+    assert assistant == [{"role": "assistant", "content": expected}]
     await _stop(ws, task)
 
 

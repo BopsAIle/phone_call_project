@@ -24,6 +24,13 @@ EVENT_SESSION_INIT = "session.init"
 EVENT_INTERRUPT = "interrupt"
 EVENT_ORDER_CREATED = "order.created"
 EVENT_CALL_END = "call.end"
+EVENT_DTMF = "dtmf"
+VALID_DTMF_DIGITS = frozenset("0123456789*#")
+SERVICE_BY_DIGIT = {
+    "1": ("booking", ""),
+    "2": ("order", "pickup"),
+    "3": ("order", "delivery"),
+}
 
 LOCALES = frozenset({"en", "de", "vi"})
 
@@ -83,12 +90,25 @@ class Interrupt:
 
 
 @dataclass(frozen=True)
+class DtmfDigit:
+    digit: str
+    call_id: str = ""
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> Optional["DtmfDigit"]:
+        digit = str(payload.get("digit") or "")
+        if digit not in VALID_DTMF_DIGITS:
+            return None
+        return cls(digit=digit, call_id=str(payload.get("callId") or payload.get("call_id") or ""))
+
+
+@dataclass(frozen=True)
 class UnknownControl:
     event: str
     payload: dict[str, Any]
 
 
-ControlMessage = Union[SessionInit, Interrupt, UnknownControl]
+ControlMessage = Union[SessionInit, Interrupt, DtmfDigit, UnknownControl]
 
 
 def parse_text_frame(raw: str) -> Optional[ControlMessage]:
@@ -104,6 +124,11 @@ def parse_text_frame(raw: str) -> Optional[ControlMessage]:
         return SessionInit.from_payload(payload)
     if event == EVENT_INTERRUPT:
         return Interrupt()
+    if event == EVENT_DTMF:
+        parsed = DtmfDigit.from_payload(payload)
+        if parsed is None:
+            return None
+        return parsed
     return UnknownControl(event=str(event or ""), payload=payload)
 
 
