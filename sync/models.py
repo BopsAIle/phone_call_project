@@ -1,4 +1,5 @@
 """Parse GET /api/v1/sync/branches into restaurant + menu snapshots."""
+## sync/models.py : nhiệm vụ là biến JSON thô từ backend thành cấu trúc sẵn sàng nhét vào Redis
 
 from __future__ import annotations
 
@@ -17,14 +18,19 @@ from order.models import MenuItem
 class SyncPayload:
     """Kết quả parse /api/v1/sync/branches, sẵn sàng đưa vào CatalogCache."""
 
+    #version: version của dữ liệu
     version: str
+    # Dictionary tra cứu từ sđt -> Restaurant. Cuộc gọi đến số nào thì biết ngay nhà hàng nào 
     by_hotline: Mapping[str, Restaurant]
+    #menus: thực đơn của từng chi nhánh . Dạng dictionary branch_id -> list[MenuItem]
     menus: Mapping[str, Sequence[MenuItem]] = field(default_factory=dict)
 
     def to_generation(self) -> GenerationPayload:
         return GenerationPayload(by_hotline=self.by_hotline, menus=self.menus)
 
-
+## Nhận field hotline từ JSON thô và chuyển thành list sđt đã chuẩn hóa 
+#-> Chuẩn hóa sđt
+#Backend gửi hotline rất tuỳ tiện — có nơi "0912-345-678", có nơi "+84912345678"-> _as_hotline_list chuyển thành list sđt đã chuẩn hóa
 def _as_hotline_list(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -44,7 +50,7 @@ def _as_hotline_list(raw: Any) -> list[str]:
         digits.append(key)
     return digits
 
-
+# parse phần "menus" của một nhà hàng (JSON dạng { branch_id: [menu items] }) thành dict[branch_id → list[MenuItem]]
 def _menus_for_restaurant(item: dict[str, Any], restaurant: Restaurant) -> dict[str, list[MenuItem]]:
     raw_menus = item.get("menus")
     if not isinstance(raw_menus, dict):
@@ -68,6 +74,17 @@ def _menus_for_restaurant(item: dict[str, Any], restaurant: Restaurant) -> dict[
         menus[branch_id] = parsed
     return menus
 
+"""
+1.unwrap_data(raw) — backend gói dữ liệu trong { "data": {...} }; hàm này bóc ra. JSON không phải object → return None (Syncer sẽ coi là fetch_failed).
+2.Đọc version — dùng để so sánh với cache lần sau.
+3.Duyệt từng restaurant:
+      restaurant_from_api(item) — parse + tự động lọc branch inactive (comment ở docstring nói rõ).
+      Bỏ luôn nhà hàng status != "active".
+      Ghép hotline: hotlines khai báo + trường phone chính → merge lại (không trùng).
+      Mọi hotline đều trỏ đến cùng một Restaurant — nên cuộc gọi vào số nào của nhà hàng đó cũng lookup được.
+4.Gom menus từ _menus_for_restaurant.
+5.Đóng gói thành SyncPayload.
+"""
 
 def parse_sync_payload(raw: Any) -> SyncPayload | None:
     """Unwrap `data`, lọc restaurant/branch active, normalize hotline.

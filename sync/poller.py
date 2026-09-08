@@ -105,7 +105,7 @@ class CatalogSyncer:
             return False
 
 ## Vòng lặp hỏi backend để lấy verison mới của dữu liệu
-#Nếu version mới hơn version hiện tại, thì lấy payload mới và swap vào Redis.
+# Nếu version mới hơn version hiện tại, thì lấy payload mới và swap vào Redis.
 # Nếu version giống nhau, thì skip.
     async def run_forever(self) -> None:
         while True:
