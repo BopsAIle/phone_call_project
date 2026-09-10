@@ -26,11 +26,14 @@ const DEFAULTS: Settings = {
   locale: "vi",
   timezone: "Asia/Ho_Chi_Minh",
   greeting:
-    "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. Bạn muốn đặt bàn hay mang về ạ?",
+    "Hello, I am the AI for Bella Vista. I will listen to your request and record this call. We will call you back if needed.",
 };
 
-const LEGACY_GREETING =
-  "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động — mình có thể giúp gì ạ?";
+const LEGACY_GREETINGS = new Set([
+  "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động — mình có thể giúp gì ạ?",
+  "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động. Bạn muốn đặt bàn hay mang về ạ?",
+  "Xin chào khách hàng, tôi là AI của nhà hàng Bella Vista. Tôi sẽ lắng nghe mong muốn của bạn và ghi âm lại, sau đó chúng tôi sẽ gọi lại cho bạn khi cần thiết.",
+]);
 
 const els = {
   wsUrl: $("wsUrl", HTMLInputElement),
@@ -80,7 +83,7 @@ function loadSettings(): Settings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULTS };
     const merged = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
-    if (merged.greeting === LEGACY_GREETING) {
+    if (LEGACY_GREETINGS.has(merged.greeting)) {
       merged.greeting = DEFAULTS.greeting;
     }
     // Token luôn lấy theo VITE_AI_BRIDGE_TOKEN hiện tại (.env), không dùng giá trị
@@ -120,12 +123,13 @@ function persist(): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(readForm()));
 }
 
-function log(message: string, tone: "info" | "warn" | "ok" = "info"): void {
+function log(message: string, tone: "info" | "warn" | "ok" | "agent" = "info"): void {
   const li = document.createElement("li");
+  li.dataset.tone = tone;
   const time = document.createElement("time");
   time.textContent = new Date().toLocaleTimeString("vi-VN", { hour12: false });
   const body = document.createElement("strong");
-  body.textContent = tone === "warn" ? "!" : tone === "ok" ? "●" : "·";
+  body.textContent = tone === "warn" ? "!" : tone === "ok" ? "●" : tone === "agent" ? "AI" : "·";
   li.append(time, body, document.createTextNode(message));
   els.log.prepend(li);
 }
@@ -264,13 +268,32 @@ const player = new PcmPlayer();
 const resampler = new LinearResampler(48000);
 const framer = new PcmFramer();
 
+/** Hold the uplink after speaker playback so room echo is not treated as the caller. */
+const ECHO_TAIL_MS = 450;
+
 let live = false;
 let muted = false;
 let canSend = false;
 let agentSpeaking = false;
 let heardAgent = false;
+let lastAgentLine = "";
 let orderPlaced = false;
 let levelTimer = 0;
+let lastSpeechLog = 0;
+let sentFirstPcm = false;
+let suppressMicUntil = 0;
+
+function noteAgentPlayback(): void {
+  suppressMicUntil = Math.max(suppressMicUntil, performance.now() + ECHO_TAIL_MS);
+}
+
+function holdingMicForEcho(now: number): boolean {
+  if (player.isPlaying) {
+    noteAgentPlayback();
+    return true;
+  }
+  return now < suppressMicUntil;
+}
 
 async function startCall(): Promise<void> {
   if (live) return;
@@ -298,15 +321,26 @@ async function startCall(): Promise<void> {
       onAudio: (samples, sampleRate) => {
         if (!live) return;
         resampler.setInputRate(sampleRate);
+        const now = performance.now();
+        const holdEcho = holdingMicForEcho(now);
         const peak = rms(samples);
-        if (!muted && peak > 0.02 && agentSpeaking) {
-          setStatus("Bạn đang nói — có thể barge-in");
+        if (!muted && !holdEcho && peak > 0.02) {
+          if (now - lastSpeechLog > 2500) {
+            lastSpeechLog = now;
+            log(`Mic có tiếng (rms ${peak.toFixed(2)})`);
+          }
         }
         if (muted || !canSend) return;
-        const resampled = resampler.push(samples);
+        // Send silence while speakers are live so laptop echo never hits STT/VAD.
+        const uplink = holdEcho ? new Float32Array(samples.length) : samples;
+        const resampled = resampler.push(uplink);
         if (resampled.length === 0) return;
         const pcm = floatToPcm16(resampled);
         for (const frame of framer.push(pcm)) {
+          if (!sentFirstPcm) {
+            sentFirstPcm = true;
+            log("Đã gửi PCM lên bridge", "ok");
+          }
           bridge.sendPcm(frame);
         }
       },
@@ -324,6 +358,10 @@ async function startCall(): Promise<void> {
   live = true;
   canSend = false;
   heardAgent = false;
+  lastAgentLine = "";
+  sentFirstPcm = false;
+  lastSpeechLog = 0;
+  suppressMicUntil = 0;
   resampler.reset();
   framer.reset();
   player.interrupt();
@@ -347,14 +385,41 @@ async function startCall(): Promise<void> {
     onPcm: (bytes) => {
       heardAgent = true;
       agentSpeaking = true;
+      noteAgentPlayback();
       player.enqueue(bytes);
-      setStatus("Agent đang nói");
+      setStatus(lastAgentLine ? `AI nói: ${lastAgentLine}` : "Agent đang nói");
     },
     onInterrupt: () => {
       agentSpeaking = false;
       player.interrupt();
+      noteAgentPlayback();
       setStatus("Barge-in — agent dừng, đang nghe bạn.");
       log("interrupt từ AI", "ok");
+    },
+    onTranscript: (payload) => {
+      if (payload.status === "started") {
+        setStatus("AI đang nhận diện giọng nói…");
+        log("AI đang nghe bạn nói");
+        console.log("[STT] speech started");
+        return;
+      }
+      const spoken = (payload.text || "").trim();
+      if (spoken) {
+        setStatus(`Bạn nói: ${spoken}`);
+        log(`Bạn nói: ${spoken}`, "ok");
+        console.log("[STT] transcript:", spoken);
+      } else {
+        log("AI không nhận ra câu nói", "warn");
+        console.warn("[STT] transcript empty");
+      }
+    },
+    onAgentSpeech: (payload) => {
+      const spoken = (payload.text || "").trim();
+      if (!spoken) return;
+      lastAgentLine = spoken;
+      setStatus(`AI nói: ${spoken}`);
+      log(`AI nói: ${spoken}`, "agent");
+      console.log("[TTS] agent:", spoken);
     },
     onOrderCreated: (payload) => {
       orderPlaced = true;
@@ -373,10 +438,11 @@ async function startCall(): Promise<void> {
   window.clearInterval(levelTimer);
   levelTimer = window.setInterval(() => {
     if (!live) return;
-    if (agentSpeaking && !player.isPlaying) {
+    const now = performance.now();
+    if (agentSpeaking && !player.isPlaying && now >= suppressMicUntil) {
       agentSpeaking = false;
     }
-    if (!heardAgent || agentSpeaking) return;
+    if (!heardAgent || agentSpeaking || holdingMicForEcho(now)) return;
     if (orderPlaced) {
       setStatus("Đã đặt hàng thành công");
       return;
@@ -394,9 +460,11 @@ async function endCall(closeSocket: boolean): Promise<void> {
   canSend = false;
   muted = false;
   heardAgent = false;
+  lastAgentLine = "";
   els.muteBtn.textContent = "Tắt mic";
   window.clearInterval(levelTimer);
   agentSpeaking = false;
+  suppressMicUntil = 0;
   if (closeSocket) bridge.close();
   player.interrupt();
   await mic.stop();
@@ -412,6 +480,7 @@ function sendDtmf(digit: string): void {
   // Im ngay tại client, không chờ server trả `interrupt` (§7.1.10).
   player.interrupt();
   agentSpeaking = false;
+  noteAgentPlayback();
   bridge.sendDtmf(digit);
   for (const btn of keypadButtons) {
     btn.setAttribute("aria-pressed", String(btn.dataset.digit === digit));

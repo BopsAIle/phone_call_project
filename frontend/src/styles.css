@@ -347,7 +347,7 @@ textarea {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 260px;
+  max-height: 380px;
   overflow: auto;
   font-size: 13px;
 }
@@ -358,10 +358,26 @@ textarea {
   color: var(--muted);
 }
 
+.log li[data-tone="ok"] {
+  color: var(--ink);
+}
+
+.log li[data-tone="agent"] {
+  color: var(--copper);
+}
+
+.log li[data-tone="warn"] {
+  color: var(--rose);
+}
+
 .log li strong {
   color: var(--ink);
   font-weight: 600;
   margin-right: 6px;
+}
+
+.log li[data-tone="agent"] strong {
+  color: var(--copper);
 }
 
 .log time {

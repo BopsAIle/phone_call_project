@@ -11,18 +11,22 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 # --- Audio (both directions) ---
-SAMPLE_RATE = 16_000
+# Wire runs at 24 kHz so the caller path is 48 kHz → 24 kHz straight to STT
+# (no lossy 16 kHz hop) and TTS (native 24 kHz) reaches the client un-resampled.
+SAMPLE_RATE = 24_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # PCM16 little-endian
 BYTES_PER_SECOND = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH
 FRAME_MS = 100
-FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 1_600
-FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH  # 3_200
+FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 2_400
+FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH  # 4_800
 
 # --- Control events ---
 EVENT_SESSION_INIT = "session.init"
 EVENT_INTERRUPT = "interrupt"
 EVENT_ORDER_CREATED = "order.created"
+EVENT_TRANSCRIPT = "transcript"
+EVENT_AGENT_SPEECH = "agent.speech"
 EVENT_CALL_END = "call.end"
 EVENT_DTMF = "dtmf"
 VALID_DTMF_DIGITS = frozenset("0123456789*#")

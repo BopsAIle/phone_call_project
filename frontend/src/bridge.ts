@@ -1,16 +1,22 @@
 import {
+  EVENT_AGENT_SPEECH,
   EVENT_DTMF,
   EVENT_INTERRUPT,
   EVENT_ORDER_CREATED,
   EVENT_SESSION_INIT,
+  EVENT_TRANSCRIPT,
+  type AgentSpeechEvent,
   type OrderCreatedEvent,
   type SessionInit,
+  type TranscriptEvent,
 } from "./protocol";
 
 export type BridgeHandlers = {
   onOpen?: () => void;
   onPcm?: (bytes: ArrayBuffer) => void;
   onInterrupt?: () => void;
+  onTranscript?: (payload: TranscriptEvent) => void;
+  onAgentSpeech?: (payload: AgentSpeechEvent) => void;
   onOrderCreated?: (payload: OrderCreatedEvent) => void;
   onControl?: (payload: Record<string, unknown>) => void;
   onClose?: (code: number, reason: string) => void;
@@ -65,6 +71,10 @@ export class BridgeClient {
           const payload = JSON.parse(event.data) as Record<string, unknown>;
           if (payload.event === EVENT_INTERRUPT) {
             handlers.onInterrupt?.();
+          } else if (payload.event === EVENT_TRANSCRIPT) {
+            handlers.onTranscript?.(payload as TranscriptEvent);
+          } else if (payload.event === EVENT_AGENT_SPEECH) {
+            handlers.onAgentSpeech?.(payload as AgentSpeechEvent);
           } else if (payload.event === EVENT_ORDER_CREATED) {
             handlers.onOrderCreated?.(payload as OrderCreatedEvent);
           }

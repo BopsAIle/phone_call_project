@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 
-from bridge.session import CallPipeline, CallState, ensure_intent_greeting
+from bridge.session import CallPipeline, CallState, ensure_intent_greeting, pcm16_peak
 from llm.stream import SERVICE_MENU_VI, fallback_phrase
 from tests.fakes import FakeBridgeSocket, FakeSTT, ScriptedLlm, ScriptedTts, SlowTts
 
@@ -37,6 +38,12 @@ def test_ensure_intent_greeting_appends_english_menu() -> None:
     assert "press 3" in spoken.casefold()
 
 
+def test_pcm16_peak_reads_little_endian_int16() -> None:
+    assert pcm16_peak(b"") == 0
+    assert pcm16_peak(struct.pack("<hh", 0, -400)) == 400
+    assert pcm16_peak(b"\x00") == 0
+
+
 def test_ensure_intent_greeting_appends_vietnamese_menu() -> None:
     spoken = ensure_intent_greeting(
         "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động.",
@@ -44,7 +51,7 @@ def test_ensure_intent_greeting_appends_vietnamese_menu() -> None:
     )
     assert spoken.startswith("Xin chào")
     assert spoken.endswith(SERVICE_MENU_VI)
-    assert "ấn phím 1" in spoken
+    assert "press 1" in spoken
 
 
 def test_ensure_intent_greeting_does_not_duplicate_menu() -> None:
@@ -73,9 +80,9 @@ async def test_vietnamese_init_speaks_booking_or_takeaway() -> None:
     await asyncio.sleep(0.1)
     spoken = " ".join(tts.spoken)
     assert "Xin chào, cảm ơn bạn đã gọi Bella Vista. Đây là trợ lý tự động." in spoken
-    assert "ấn phím 1" in spoken
-    assert "ấn phím 2" in spoken
-    assert "ấn phím 3" in spoken
+    assert "press 1" in spoken
+    assert "press 2" in spoken
+    assert "press 3" in spoken
     assert pipeline.session.awaiting_choice is True
     await _stop(ws, task)
 
@@ -145,6 +152,53 @@ async def test_transcript_runs_llm_and_tts() -> None:
     user_msgs = [m for m in llm.calls[0] if m["role"] == "user"]
     assert user_msgs[-1]["content"] == "A table for two tonight."
     assert "We have a table at seven." in tts.spoken
+    await _stop(ws, task)
+
+
+def _control_events(ws: FakeBridgeSocket) -> list[dict]:
+    events = []
+    for kind, data in ws.sent:
+        if kind != "text":
+            continue
+        events.append(json.loads(data))
+    return events
+
+
+async def test_speech_and_transcript_are_pushed_to_bridge() -> None:
+    ws = FakeBridgeSocket()
+    pipeline, task = await _start_pipeline(ws, FakeSTT(), ScriptedLlm(["Okay."]), ScriptedTts())
+    await ws.push_text(json.dumps(INIT))
+    await asyncio.sleep(0.1)
+    pipeline.session.state = CallState.LISTENING
+    await pipeline.on_speech_started()
+    await pipeline.on_transcript_completed("cho mình KFC")
+    await asyncio.sleep(0.05)
+    events = [e for e in _control_events(ws) if e.get("event") == "transcript"]
+    assert {"event": "transcript", "callId": INIT["callId"], "status": "started"} in events
+    assert {
+        "event": "transcript",
+        "callId": INIT["callId"],
+        "status": "completed",
+        "text": "cho mình KFC",
+    } in events
+    await _stop(ws, task)
+
+
+async def test_agent_speech_scripts_are_pushed_to_bridge() -> None:
+    ws = FakeBridgeSocket()
+    tts = ScriptedTts()
+    pipeline, task = await _start_pipeline(ws, FakeSTT(), ScriptedLlm(["We have a table at seven."]), tts)
+    await ws.push_text(json.dumps(INIT))
+    await asyncio.sleep(0.15)
+    expected = ensure_intent_greeting(INIT["greeting"], "en")
+    greeting_events = [e for e in _control_events(ws) if e.get("event") == "agent.speech"]
+    assert greeting_events
+    assert all(e.get("callId") == INIT["callId"] for e in greeting_events)
+    assert " ".join(e["text"] for e in greeting_events) == expected
+    await pipeline.on_transcript_completed("A table for two tonight.")
+    await asyncio.sleep(0.1)
+    reply_events = [e for e in _control_events(ws) if e.get("event") == "agent.speech"]
+    assert any(e.get("text") == "We have a table at seven." for e in reply_events)
     await _stop(ws, task)
 
 
