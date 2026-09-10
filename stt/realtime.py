@@ -17,7 +17,7 @@ TRANSCRIPT_FAILED = "conversation.item.input_audio_transcription.failed"
 
 VAD = {
     "type": "server_vad",
-    "threshold": 0.5,
+    "threshold": 0.3,
     "prefix_padding_ms": 300,
     "silence_duration_ms": 450,
 }
@@ -37,14 +37,44 @@ class SttHandler(Protocol):
 
 def _event_type(event: Any) -> str:
     if isinstance(event, dict):
-        return str(event.get("type") or "")
-    return str(getattr(event, "type", "") or "")
+        raw = event.get("type") or ""
+    else:
+        raw = getattr(event, "type", "") or ""
+    if hasattr(raw, "value"):
+        raw = raw.value
+    return str(raw or "")
 
 
 def _event_field(event: Any, name: str, default: Any = None) -> Any:
     if isinstance(event, dict):
         return event.get(name, default)
     return getattr(event, name, default)
+
+
+def transcript_from_event(event: Any) -> str:
+    """Pull transcribed text from Realtime event shapes (top-level or item.content)."""
+    direct = str(_event_field(event, "transcript", "") or "").strip()
+    if direct:
+        return direct
+    item = _event_field(event, "item")
+    if item is None:
+        return ""
+    role = _event_field(item, "role") if not isinstance(item, dict) else item.get("role")
+    if role and str(role) != "user":
+        return ""
+    content = _event_field(item, "content") if not isinstance(item, dict) else item.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, dict):
+            piece = part.get("transcript") or part.get("text") or ""
+        else:
+            piece = getattr(part, "transcript", None) or getattr(part, "text", None) or ""
+        text = str(piece or "").strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
 
 ##stt
 class RealtimeTranscriptionClient:
@@ -58,6 +88,8 @@ class RealtimeTranscriptionClient:
         self._recv_task: Optional[asyncio.Task[None]] = None
         self._ready = asyncio.Event()
         self.closed = False
+        self._last_transcript_key = ""
+        self._logged_events = 0
 
     @property
     def is_ready(self) -> bool:
@@ -82,16 +114,19 @@ class RealtimeTranscriptionClient:
             await self.close()
 
     def _session_payload(self, locale: str | None) -> dict[str, Any]:
-        transcription: dict[str, Any] = {"model": self._model}
-        if locale:
-            transcription["language"] = locale[:2].lower()
+        # Pin transcription.language to English: the deployment only handles
+        # English speech, so forcing "en" avoids auto-detect flip-flopping on
+        # short/noisy turns.
+        del locale  # pinned to English regardless of session locale
         return {
             "type": "transcription",
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": 24000},
-                    "transcription": transcription,
+                    "transcription": {"model": self._model, "language": "en"},
                     "turn_detection": dict(VAD),
+                    # Browser already filters; OpenAI NR before VAD can swallow laptop speech.
+                    "noise_reduction": None,
                 }
             },
         }
@@ -127,16 +162,34 @@ class RealtimeTranscriptionClient:
         handler = self._handler
         if handler is None:
             return
+        if self._logged_events < 12:
+            self._logged_events += 1
+            logger.info("STT event[%s] callId=%s type=%s", self._logged_events, self._call_id, et or "?")
+        if et in {"session.created", "session.updated", "transcription_session.updated"}:
+            logger.info("STT session event callId=%s type=%s", self._call_id, et)
         if et == SPEECH_STARTED:
+            logger.info("STT speech_started callId=%s", self._call_id)
             await handler.on_speech_started()
         elif et == SPEECH_STOPPED:
+            logger.info("STT speech_stopped callId=%s", self._call_id)
             await handler.on_speech_stopped()
         elif et == TRANSCRIPT_DELTA:
             delta = _event_field(event, "delta", "") or ""
             logger.debug("STT delta callId=%s %r", self._call_id, delta)
             await handler.on_transcript_delta(delta)
-        elif et == TRANSCRIPT_DONE:
-            text = (_event_field(event, "transcript", "") or "").strip()
+        elif et == TRANSCRIPT_DONE or et in {"conversation.item.done", "conversation.item.added"}:
+            text = transcript_from_event(event)
+            if et != TRANSCRIPT_DONE and not text:
+                return
+            key = str(_event_field(event, "item_id", "") or "")
+            item = _event_field(event, "item")
+            if not key and item is not None:
+                key = str(_event_field(item, "id", "") or "")
+            if key and key == self._last_transcript_key:
+                return
+            if key:
+                self._last_transcript_key = key
+            logger.info("Người gọi (STT): %s", text)
             await handler.on_transcript_completed(text)
         elif et == TRANSCRIPT_FAILED:
             logger.error("STT transcription failed callId=%s event=%s", self._call_id, event)
@@ -146,6 +199,12 @@ class RealtimeTranscriptionClient:
             logger.error("Realtime error callId=%s %s", self._call_id, err)
             await self._maybe_fallback_session(err)
         else:
+            if "transcript" in et:
+                text = transcript_from_event(event)
+                logger.info("STT event callId=%s type=%s text=%r", self._call_id, et, text)
+                if text:
+                    await handler.on_transcript_completed(text)
+                    return
             logger.debug("Realtime event %s callId=%s", et, self._call_id)
 
     async def _maybe_fallback_session(self, err: Any) -> None:
@@ -171,7 +230,7 @@ class RealtimeTranscriptionClient:
                     "audio": {
                         "input": {
                             "format": {"type": "audio/pcm", "rate": 24000},
-                            "transcription": {"model": self._model},
+                            "transcription": {"model": self._model, "language": "en"},
                             "turn_detection": {
                                 **VAD,
                                 "create_response": False,
