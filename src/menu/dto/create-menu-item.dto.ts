@@ -41,12 +41,12 @@ export class CreateMenuItemDto {
   description?: string;
 
   @ApiProperty({
-    description: 'Giá tiền (VNĐ)',
-    example: 45000,
+    description: 'Giá tiền (USD)',
+    example: 1.1,
     minimum: 0,
   })
   @IsNotEmpty({ message: 'Giá tiền không được để trống' })
-  @IsNumber({}, { message: 'Giá tiền phải là số' })
+  @IsNumber({ maxDecimalPlaces: 2 }, { message: 'Giá tiền phải là số với tối đa 2 chữ số thập phân' })
   @Min(0, { message: 'Giá tiền phải lớn hơn hoặc bằng 0' })
   price: number;
 
