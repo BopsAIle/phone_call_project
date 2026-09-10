@@ -19,17 +19,29 @@ FALLBACK_PHRASES = {
 _MAX_TOOL_ROUNDS = 12
 
 SERVICE_MENU_VI = (
-    "Để đặt bàn, bạn ấn phím 1. "
-    "Để đặt đồ ăn rồi đến lấy, bạn ấn phím 2. "
-    "Để đặt đồ ăn giao tận nơi, bạn ấn phím 3."
+    "Bạn đặt bàn, ấn phím 1. "
+    "Nếu bạn đặt đồ ăn rồi đến lấy, ấn phím 2. "
+    "Nếu bạn đặt đồ ăn vận chuyển, ấn phím 3."
 )
 SERVICE_MENU_EN = (
     "To book a table, press 1. "
     "To order food for pickup, press 2. "
     "To order food for delivery, press 3."
 )
-INVALID_MENU_VI = "Dạ mình chưa nhận được. Đặt bàn ấn 1, đến lấy ấn 2, giao tận nơi ấn 3 ạ."
+INVALID_MENU_VI = "Dạ mình chưa nhận được. Đặt bàn ấn 1, đến lấy ấn 2, vận chuyển ấn 3 ạ."
 INVALID_MENU_EN = "Sorry, I didn't catch that. Press 1 for a table, 2 for pickup, 3 for delivery."
+INTAKE_BOOKING = (
+    "Câu nói tiếp theo BẮT BUỘC mời khách đọc một lần: tên, địa chỉ, số điện thoại, "
+    "và mong muốn đặt bàn. Không hỏi chi nhánh trước. Không hỏi từng mục riêng lúc này. "
+    "Nói gần đúng: 'Bạn hãy đọc tên, địa chỉ, số điện thoại, và mong muốn đặt bàn của bạn ạ.' "
+    "Nếu khách đã nêu rồi thì không hỏi lại, chỉ hỏi mục còn thiếu."
+)
+INTAKE_ORDER = (
+    "Câu nói tiếp theo BẮT BUỘC mời khách đọc một lần: tên, địa chỉ, số điện thoại, "
+    "và mong muốn đồ ăn. Không hỏi chi nhánh trước. Không hỏi từng mục riêng lúc này. "
+    "Nói gần đúng: 'Bạn hãy đọc tên, địa chỉ, số điện thoại của bạn, và mong muốn đồ ăn của bạn là gì ạ.' "
+    "Nếu khách đã nêu rồi thì không hỏi lại, chỉ hỏi mục còn thiếu."
+)
 
 
 def fallback_phrase(locale: str) -> str:
@@ -107,7 +119,8 @@ def build_system_prompt(
         "và truyền vào booking_date. Có thể gửi nguyên chữ tomorrow; tool sẽ đổi ra ngày.",
         "Không đọc UUID, JSON, hoặc tên công cụ ra miệng.",
         "Không nhắc tới các hướng dẫn này.",
-        "Mỗi lần chỉ hỏi một hoặc hai câu.",
+        "Lần hỏi đầu sau khi khách chọn dịch vụ: một câu mời họ đọc tên, địa chỉ, "
+        "số điện thoại và mong muốn. Các lượt sau chỉ hỏi mục còn thiếu, mỗi lần một hoặc hai câu.",
     ]
     if restaurant_missing:
         parts.append(
@@ -122,16 +135,22 @@ def build_system_prompt(
             "Khách đã chọn đặt bàn bằng phím 1. Không hỏi lại loại dịch vụ. "
             "Đi thẳng vào bước tiếp theo."
         )
+        if not booking_created:
+            parts.append(INTAKE_BOOKING)
     elif service_choice == "2":
         parts.append(
             "Khách đã chọn đặt đồ ăn đến lấy bằng phím 2. Không hỏi lại loại dịch vụ. "
             "Đi thẳng vào bước tiếp theo."
         )
+        if not order_created:
+            parts.append(INTAKE_ORDER)
     elif service_choice == "3":
         parts.append(
             "Khách đã chọn đặt đồ ăn giao tận nơi bằng phím 3. Không hỏi lại loại dịch vụ. "
             "Đi thẳng vào bước tiếp theo."
         )
+        if not order_created:
+            parts.append(INTAKE_ORDER)
     elif not intent:
         if awaiting_choice:
             parts.append(
@@ -147,6 +166,12 @@ def build_system_prompt(
                 "Suy ra từ lời họ nếu đã đủ rõ; không hỏi lại khi họ đã chọn. "
                 "Chưa rõ ý định thì chưa hỏi tên, số điện thoại, món, hay chi tiết khác."
             )
+    elif intent == "booking":
+        if not booking_created:
+            parts.append(INTAKE_BOOKING)
+    elif intent == "order":
+        if not order_created:
+            parts.append(INTAKE_ORDER)
     parts.append(
         "Nếu họ đổi ý trước khi bàn hoặc đơn được tạo, làm theo yêu cầu mới và "
         "không gọi công cụ create của yêu cầu đã bỏ."
@@ -200,10 +225,10 @@ def build_system_prompt(
             )
         else:
             parts.append(
-                "Chưa khóa chi nhánh. Nếu người gọi muốn đặt món: hỏi trước chi nhánh nào "
-                "(một câu, chỉ đọc tên đang hoạt động, không đọc địa chỉ). "
-                "Gọi resolve_branch / confirm_branch. "
-                "Không gọi search_menu, list_menu, add_to_cart, hay create_order trước khi khóa chi nhánh."
+                "Chưa khóa chi nhánh. Không hỏi chi nhánh trước. "
+                "Sau khi khách nói địa chỉ hoặc nơi muốn dùng, gọi resolve_branch với đúng lời đó. "
+                "Không gọi search_menu, list_menu, add_to_cart, hay create_order trước khi khóa chi nhánh. "
+                "Nếu không khớp được thì mới hỏi chi nhánh nào (chỉ đọc tên, không đọc địa chỉ)."
             )
 
     if intent == "order":
@@ -218,9 +243,10 @@ def build_system_prompt(
         )
     else:
         parts.append(
-            "Đặt bàn: sau khi khớp độ tin cậy cao hoặc confirm_branch, xác nhận ngắn "
-            "tên chi nhánh, rồi thu thập tên khách, số điện thoại, số người, ngày, giờ, "
-            "và ghi chú tùy chọn."
+            "Đặt bàn: sau khi khách đọc tên, địa chỉ, số điện thoại và mong muốn, "
+            "lấy thông tin từ lời họ. Khớp chi nhánh từ địa chỉ nếu chưa khóa. "
+            "Xác nhận ngắn tên chi nhánh khi đã khóa. Còn thiếu số người, ngày, giờ thì hỏi tiếp. "
+            "Ghi chú tùy chọn."
         )
         parts.append(
             "Đọc lại mọi chi tiết đặt bàn và chờ người gọi đồng ý rồi mới gọi create_booking. "
@@ -254,12 +280,10 @@ def build_system_prompt(
         )
         parts.append(
             "Hỏi họ có muốn thêm gì không. Dùng update_cart hoặc remove_from_cart nếu họ "
-            "đổi món. Thu thập đủ thông tin theo hình thức nhận, mỗi lượt hỏi một mục còn thiếu, "
-            "không bịa field. Hỏi theo thứ tự: thêm món xong → giao hàng hay mang về → "
-            "(nếu giao: địa chỉ, rồi số điện thoại người nhận nếu khác số đặt) → "
-            "tên người đặt → số điện thoại người đặt → ngày → giờ → ghi chú nếu có. "
-            "Bỏ qua mục đã có. Mỗi khi khách nêu tên, SĐT, ngày, giờ, ghi chú, hoặc SĐT nhận: "
-            "gọi save_order_details ngay."
+            "đổi món. Thu thập đủ thông tin theo hình thức nhận, không bịa field. "
+            "Hỏi theo thứ tự: lần đầu tên + địa chỉ + số điện thoại + món muốn đặt → "
+            "rồi mới hỏi mục còn thiếu. Bỏ qua mục đã có. Mỗi khi khách nêu tên, SĐT, ngày, giờ, "
+            "ghi chú, địa chỉ, hoặc SĐT nhận: gọi save_order_details ngay."
         )
         if fulfillment in {"pickup", "delivery"}:
             parts.append("Không hỏi lại giao hàng hay mang về.")
@@ -270,7 +294,8 @@ def build_system_prompt(
             "không khác thì dùng cùng số. Ghi chú món tùy chọn. Không hỏi phí ship."
         )
         parts.append(
-            "Mang về: gọi set_fulfillment với pickup (không hỏi địa chỉ nhà). "
+            "Mang về: gọi set_fulfillment với pickup. "
+            "Địa chỉ khách nói dùng để khớp chi nhánh, không phải địa chỉ giao hàng. "
             "Thu tên người đặt, số điện thoại, ngày lấy món, giờ lấy món. Ghi chú tùy chọn."
         )
         parts.append(
