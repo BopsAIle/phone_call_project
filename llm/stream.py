@@ -14,38 +14,35 @@ logger = logging.getLogger(__name__)
 SENTENCE_ENDS = frozenset(".?!…\n")
 FALLBACK_PHRASES = {
     "en": "Sorry, I didn't catch that. Could you say that again?",
-    "vi": "Xin lỗi, mình chưa nghe rõ. Bạn nói lại giúp mình được không ạ?",
 }
 _MAX_TOOL_ROUNDS = 12
 
-SERVICE_MENU_VI = (
-    "Bạn đặt bàn, ấn phím 1. "
-    "Nếu bạn đặt đồ ăn rồi đến lấy, ấn phím 2. "
-    "Nếu bạn đặt đồ ăn vận chuyển, ấn phím 3."
-)
 SERVICE_MENU_EN = (
     "To book a table, press 1. "
     "To order food for pickup, press 2. "
     "To order food for delivery, press 3."
 )
-INVALID_MENU_VI = "Dạ mình chưa nhận được. Đặt bàn ấn 1, đến lấy ấn 2, vận chuyển ấn 3 ạ."
+SERVICE_MENU_VI = SERVICE_MENU_EN
 INVALID_MENU_EN = "Sorry, I didn't catch that. Press 1 for a table, 2 for pickup, 3 for delivery."
+INVALID_MENU_VI = INVALID_MENU_EN
 INTAKE_BOOKING = (
-    "Câu nói tiếp theo BẮT BUỘC mời khách đọc một lần: tên, địa chỉ, số điện thoại, "
-    "và mong muốn đặt bàn. Không hỏi chi nhánh trước. Không hỏi từng mục riêng lúc này. "
-    "Nói gần đúng: 'Bạn hãy đọc tên, địa chỉ, số điện thoại, và mong muốn đặt bàn của bạn ạ.' "
-    "Nếu khách đã nêu rồi thì không hỏi lại, chỉ hỏi mục còn thiếu."
+    "Your next spoken turn MUST invite the caller to say, in one go: their name, address, "
+    "phone number, and table-booking request. Do not ask for a branch first. "
+    "Do not ask for each field separately yet. "
+    "Say something like: 'Please say your name, address, phone number, and what you want for the table booking.' "
+    "If they already gave this, do not ask again; only ask for what is still missing."
 )
 INTAKE_ORDER = (
-    "Câu nói tiếp theo BẮT BUỘC mời khách đọc một lần: tên, địa chỉ, số điện thoại, "
-    "và mong muốn đồ ăn. Không hỏi chi nhánh trước. Không hỏi từng mục riêng lúc này. "
-    "Nói gần đúng: 'Bạn hãy đọc tên, địa chỉ, số điện thoại của bạn, và mong muốn đồ ăn của bạn là gì ạ.' "
-    "Nếu khách đã nêu rồi thì không hỏi lại, chỉ hỏi mục còn thiếu."
+    "Your next spoken turn MUST invite the caller to say, in one go: their name, address, "
+    "phone number, and food request. Do not ask for a branch first. "
+    "Do not ask for each field separately yet. "
+    "Say something like: 'Please say your name, address, phone number, and what food you would like.' "
+    "If they already gave this, do not ask again; only ask for what is still missing."
 )
 
 
 def fallback_phrase(locale: str) -> str:
-    return FALLBACK_PHRASES.get((locale or "en").lower()[:2], FALLBACK_PHRASES["en"])
+    return FALLBACK_PHRASES["en"]
 
 
 def _now_in_zone(timezone: str) -> tuple[str, str]:
@@ -59,11 +56,10 @@ def _now_in_zone(timezone: str) -> tuple[str, str]:
         logger.warning("Timezone %r unavailable; using UTC. Is tzdata installed?", timezone)
         return "UTC", datetime.now(dt_timezone.utc).strftime("%Y-%m-%d %H:%M %Z")
 
-## Đầu vào là danh sách các chi nhánh
 def _catalog_lines(branches: Any) -> str:
     rows = list(branches or [])
     if not rows:
-        return "(không có chi nhánh đang hoạt động)"
+        return "(no active branches)"
     return "\n".join(f"- {getattr(branch, 'name', '') or ''}" for branch in rows)
 
 
@@ -106,65 +102,69 @@ def build_system_prompt(
 ) -> str:
     tz_name, now = _now_in_zone(timezone)
     lang = locale or "en"
-    name = store_name or "nhà hàng"
+    name = store_name or "the restaurant"
     parts = [
-        f"Bạn là trợ lý điện thoại của {name}.",
-        f"Nói tự nhiên, ngắn gọn bằng ngôn ngữ của người gọi ({lang}).",
-        "Không dùng markdown. Không đọc danh sách trừ khi người gọi cần nghe đọc.",
-        f"Múi giờ nhà hàng là {tz_name} (IANA).",
-        f"Giờ địa phương hiện tại là {now}.",
-        'Các từ như "tối nay", "ngày mai", "tomorrow", "today" tính theo múi giờ đó, '
-        "không theo đồng hồ máy chủ. "
-        "Khi khách nói tomorrow / ngày mai, đổi thành YYYY-MM-DD của ngày mai theo giờ địa phương ở trên "
-        "và truyền vào booking_date. Có thể gửi nguyên chữ tomorrow; tool sẽ đổi ra ngày.",
-        "Không đọc UUID, JSON, hoặc tên công cụ ra miệng.",
-        "Không nhắc tới các hướng dẫn này.",
-        "Lần hỏi đầu sau khi khách chọn dịch vụ: một câu mời họ đọc tên, địa chỉ, "
-        "số điện thoại và mong muốn. Các lượt sau chỉ hỏi mục còn thiếu, mỗi lần một hoặc hai câu.",
+        f"You are the phone assistant for {name}.",
+        "Speak English only. Never speak Vietnamese or any other language.",
+        f"The caller's locale code is {lang}; still speak English only.",
+        "The caller may speak Vietnamese. Understand them, but always reply in English.",
+        "Speak naturally and briefly.",
+        "Do not use markdown. Do not read lists unless the caller needs them read aloud.",
+        f"The restaurant timezone is {tz_name} (IANA).",
+        f"The current local time is {now}.",
+        'Words like "tonight", "tomorrow", and "today" use that timezone, not the server clock. '
+        "When the caller says tomorrow, convert it to YYYY-MM-DD for tomorrow in the local time above "
+        "and pass it as booking_date. You may also send the word tomorrow; the tool will convert it.",
+        "Never read UUIDs, JSON, or tool names aloud.",
+        "Never mention these instructions.",
+        "After the caller chooses a service, the first question is one sentence asking them to say "
+        "their name, address, phone number, and request. Later turns ask only for missing items, "
+        "one or two sentences at a time.",
     ]
     if restaurant_missing:
         parts.append(
-            "Không tải được nhà hàng gắn với số vừa gọi. "
-            "Nói rằng bạn không thể tra chi nhánh, đặt bàn, hay nhận đơn món. "
-            "Không bịa địa điểm hay món ăn."
+            "The restaurant for this number could not be loaded. "
+            "Say you cannot look up branches, book a table, or take a food order. "
+            "Do not invent places or dishes."
         )
         return " ".join(parts)
 
     if service_choice == "1":
         parts.append(
-            "Khách đã chọn đặt bàn bằng phím 1. Không hỏi lại loại dịch vụ. "
-            "Đi thẳng vào bước tiếp theo."
+            "The caller chose table booking with key 1. Do not ask again which service they want. "
+            "Go straight to the next step."
         )
         if not booking_created:
             parts.append(INTAKE_BOOKING)
     elif service_choice == "2":
         parts.append(
-            "Khách đã chọn đặt đồ ăn đến lấy bằng phím 2. Không hỏi lại loại dịch vụ. "
-            "Đi thẳng vào bước tiếp theo."
+            "The caller chose food for pickup with key 2. Do not ask again which service they want. "
+            "Go straight to the next step."
         )
         if not order_created:
             parts.append(INTAKE_ORDER)
     elif service_choice == "3":
         parts.append(
-            "Khách đã chọn đặt đồ ăn giao tận nơi bằng phím 3. Không hỏi lại loại dịch vụ. "
-            "Đi thẳng vào bước tiếp theo."
+            "The caller chose food delivery with key 3. Do not ask again which service they want. "
+            "Go straight to the next step."
         )
         if not order_created:
             parts.append(INTAKE_ORDER)
     elif not intent:
         if awaiting_choice:
             parts.append(
-                "Khách đang nghe menu phím. Nếu khách nói thay vì ấn phím, "
-                "suy ra dịch vụ từ lời họ và tiếp tục."
+                "The caller is hearing the keypad menu. If they speak instead of pressing a key, "
+                "infer the service from their words and continue."
             )
         else:
             parts.append(
-                "Sau câu chào, nếu khách chưa nói rõ muốn gì, hỏi một câu: "
-                "bạn muốn đặt bàn hay mang về. "
-                "Đặt bàn là giữ chỗ tại quán. Mang về là đặt món để lấy tại quán. "
-                "Nếu họ nói giao hàng hoặc ship thì nhận đơn giao hàng. "
-                "Suy ra từ lời họ nếu đã đủ rõ; không hỏi lại khi họ đã chọn. "
-                "Chưa rõ ý định thì chưa hỏi tên, số điện thoại, món, hay chi tiết khác."
+                "After the greeting, if the caller has not said what they want, ask one question: "
+                "would you like to book a table or order takeaway. "
+                "Booking a table means reserving a seat at the restaurant. "
+                "Takeaway means ordering food to pick up. "
+                "If they say delivery or shipping, take a delivery order. "
+                "Infer from their words when it is already clear; do not ask again after they have chosen. "
+                "Until the intent is clear, do not ask for name, phone number, dishes, or other details."
             )
     elif intent == "booking":
         if not booking_created:
@@ -173,153 +173,155 @@ def build_system_prompt(
         if not order_created:
             parts.append(INTAKE_ORDER)
     parts.append(
-        "Nếu họ đổi ý trước khi bàn hoặc đơn được tạo, làm theo yêu cầu mới và "
-        "không gọi công cụ create của yêu cầu đã bỏ."
+        "If they change their mind before a table or order is created, follow the new request and "
+        "do not call the create tool for the request they dropped."
     )
 
     if not catalog_loaded:
         return " ".join(parts)
 
-    parts.append("Tên chi nhánh được phép đọc (chỉ đọc tên, không kèm địa chỉ):")
+    parts.append("Branch names you may read aloud (names only, no addresses):")
     parts.append(_catalog_lines(branches))
     private_addr = _catalog_addresses_private(branches)
     if private_addr:
         parts.append(
-            "Địa chỉ nội bộ — CẤM đọc khi kể tên hay hỏi khách chọn chi nhánh. "
-            "Chỉ đọc khi khách hỏi địa chỉ, vị trí, hay chi nhánh ở đâu:"
+            "Internal addresses — NEVER read these when listing names or asking the caller to choose a branch. "
+            "Read them only if the caller asks for an address, location, or where a branch is:"
         )
         parts.append(private_addr)
     if selected_branch_name:
-        parts.append(f"Chi nhánh đang chọn: {selected_branch_name}.")
+        parts.append(f"Selected branch: {selected_branch_name}.")
     else:
-        parts.append("Chưa chọn chi nhánh.")
+        parts.append("No branch is selected yet.")
     parts.append(
-        "Khi nói về chi nhánh: chỉ đọc tên. Không đọc địa chỉ, đường phố, hay số nhà "
-        "trừ khi người gọi hỏi địa chỉ, vị trí, hay chi nhánh ở đâu. "
-        "Khi họ hỏi, đọc đúng địa chỉ trong danh mục nội bộ."
+        "When talking about branches: read the name only. Do not read the street address "
+        "unless the caller asks for the address, location, or where the branch is. "
+        "When they ask, read the exact address from the internal catalog."
     )
     parts.append(
-        "HCM, TP HCM, TPHCM, Sài Gòn nghĩa là Hồ Chí Minh. "
-        "Khi khách nói HCM thì hiểu là chi nhánh mang tên HCM / Hồ Chí Minh, "
-        "không phải chi nhánh khác chỉ vì địa chỉ có chữ HCM. "
-        "Khi đọc tên có HCM thì đọc Hồ Chí Minh. Không đọc địa chỉ lúc kể tên."
+        "HCM, TP HCM, TPHCM, and Saigon mean Ho Chi Minh. "
+        "When the caller says HCM, match the branch named HCM / Ho Chi Minh, "
+        "not another branch just because its address contains HCM. "
+        "When reading a name that contains HCM, say Ho Chi Minh. Do not read the address when listing names."
     )
     parts.append(
-        "Khi người gọi nêu hoặc chọn chi nhánh, BẮT BUỘC gọi resolve_branch "
-        "với đúng lời họ nói (ví dụ 'tôi muốn chọn chi nhánh quận 3'). "
-        "Công cụ sẽ đưa lời đó cho model so với list chi nhánh đang có. "
-        "Không tự kết luận chi nhánh có hay không trước khi có kết quả công cụ. "
-        "Cùng một chi nhánh đã khóa dùng cho đặt bàn và làm bếp / điểm lấy món."
+        "When the caller names or chooses a branch, you MUST call resolve_branch "
+        "with their exact words (for example 'I want the district 3 branch'). "
+        "The tool compares that against the current branch list. "
+        "Do not decide on your own whether the branch exists before the tool result. "
+        "The same locked branch is used for table booking and for kitchen / pickup."
     )
     parts.append(
-        "Nếu resolve_branch trả none, nói địa điểm đó không phải của mình và "
-        "nêu tên chi nhánh thật. Nếu ambiguous hoặc độ tin cậy thấp, hỏi họ muốn chi nhánh nào "
-        "rồi gọi confirm_branch với branch_id từ công cụ."
+        "If resolve_branch returns none, say that place is not one of yours and "
+        "read the real branch names. If the result is ambiguous or low confidence, ask which branch they want "
+        "then call confirm_branch with a branch_id from the tool."
     )
 
     branch_count = len(list(branches or []))
     if not selected_branch_name:
         if branch_count <= 1:
             parts.append(
-                "Nhà hàng chỉ có một chi nhánh đang hoạt động. Dùng chi nhánh đó, không hỏi khách chọn."
+                "This restaurant has only one active branch. Use that branch; do not ask the caller to choose."
             )
         else:
             parts.append(
-                "Chưa khóa chi nhánh. Không hỏi chi nhánh trước. "
-                "Sau khi khách nói địa chỉ hoặc nơi muốn dùng, gọi resolve_branch với đúng lời đó. "
-                "Không gọi search_menu, list_menu, add_to_cart, hay create_order trước khi khóa chi nhánh. "
-                "Nếu không khớp được thì mới hỏi chi nhánh nào (chỉ đọc tên, không đọc địa chỉ)."
+                "No branch is locked yet. Do not ask for a branch first. "
+                "After the caller says an address or place, call resolve_branch with those exact words. "
+                "Do not call search_menu, list_menu, add_to_cart, or create_order before a branch is locked. "
+                "If it does not match, then ask which branch (read names only, no addresses)."
             )
 
     if intent == "order":
-        parts.append("Người gọi hiện đang đặt món.")
+        parts.append("The caller is currently placing a food order.")
     elif intent == "booking":
-        parts.append("Người gọi hiện đang đặt bàn.")
+        parts.append("The caller is currently booking a table.")
 
     if booking_created:
         parts.append(
-            "Cuộc gọi này đã tạo đặt bàn. Không gọi create_booking nữa. "
-            "Vẫn có thể nhận đơn món nếu chưa tạo."
+            "This call already created a table booking. Do not call create_booking again. "
+            "You may still take a food order if one has not been created."
         )
     else:
         parts.append(
-            "Đặt bàn: sau khi khách đọc tên, địa chỉ, số điện thoại và mong muốn, "
-            "lấy thông tin từ lời họ. Khớp chi nhánh từ địa chỉ nếu chưa khóa. "
-            "Xác nhận ngắn tên chi nhánh khi đã khóa. Còn thiếu số người, ngày, giờ thì hỏi tiếp. "
-            "Ghi chú tùy chọn."
+            "Table booking: after the caller says their name, address, phone number, and request, "
+            "take the details from their words. Match the branch from the address if none is locked. "
+            "Briefly confirm the branch name once locked. If party size, date, or time is still missing, ask next. "
+            "Notes are optional."
         )
         parts.append(
-            "Đọc lại mọi chi tiết đặt bàn và chờ người gọi đồng ý rồi mới gọi create_booking. "
-            "restaurant_id và branch_id đã có trong bộ nhớ — không hỏi. "
-            "Sau khi người gọi xác nhận, BẮT BUỘC gọi create_booking trong lượt đó. "
-            "Không nói bàn đã đặt, đã giữ, hay đã xác nhận trừ khi create_booking "
-            "trả về ok true. Nếu thất bại, nói thật và không nhận thành công."
+            "Read back every booking detail and wait for the caller to agree before calling create_booking. "
+            "restaurant_id and branch_id are already in memory — do not ask for them. "
+            "After the caller confirms, you MUST call create_booking in that turn. "
+            "Do not say the table is booked, held, or confirmed unless create_booking "
+            "returns ok true. If it fails, say so and do not claim success."
         )
 
     if order_created:
         parts.append(
-            "Cuộc gọi này đã tạo đơn món. Không gọi create_order nữa. "
-            "Vẫn có thể nhận đặt bàn nếu chưa tạo."
+            "This call already created a food order. Do not call create_order again. "
+            "You may still take a table booking if one has not been created."
         )
     else:
         parts.append(
-            "Đặt món (giao hàng hoặc mang về): không đọc hết thực đơn. Không đọc phí giao hàng "
-            "hay UUID. Khi khách hỏi thực đơn, có món gì, những món nào: nếu chưa khóa chi nhánh "
-            "thì gọi resolve_branch trước, rồi list_menu. list_menu GET menu của chi nhánh đã khóa. "
-            "Đọc vài tên món, hỏi họ muốn món nào; không đọc hết nếu nhiều; không đọc địa chỉ chi nhánh. "
-            "Nếu câu vừa nêu chi nhánh vừa hỏi món cụ thể: resolve_branch rồi search_menu chỉ với tên món. "
-            "Khi người gọi nêu tên món và chi nhánh đã khóa, BẮT BUỘC gọi search_menu "
-            "với đúng tên món trước khi khẳng định món đó có. Không bịa món."
+            "Food orders (delivery or pickup): do not read the whole menu. Do not read delivery fees "
+            "or UUIDs. When the caller asks for the menu or what dishes you have: if no branch is locked "
+            "call resolve_branch first, then list_menu. list_menu GETs the menu of the locked branch. "
+            "Read a few dish names and ask which they want; do not read everything if the list is long; "
+            "do not read the branch address. "
+            "If the same sentence names a branch and a specific dish: resolve_branch then search_menu with the dish name only. "
+            "When the caller names a dish and a branch is locked, you MUST call search_menu "
+            "with that dish name before saying the dish exists. Do not invent dishes."
         )
         parts.append(
-            "Nếu search_menu trả none, nói không có món đó và nêu tên gần nếu công cụ "
-            "liệt kê candidates. Nếu ambiguous hoặc độ tin cậy thấp, hỏi họ muốn món nào. "
-            "search_menu hoặc list_menu trả no_branch thì hỏi chi nhánh rồi resolve_branch / confirm_branch, "
-            "không bịa menu. Sau khi khớp rõ, gọi add_to_cart với menu_item_id từ công cụ, "
-            "số lượng, và ghi chú dòng tùy chọn."
+            "If search_menu returns none, say you do not have that dish and mention nearby names if the tool "
+            "lists candidates. If the result is ambiguous or low confidence, ask which dish they want. "
+            "If search_menu or list_menu returns no_branch, ask for the branch then resolve_branch / confirm_branch; "
+            "do not invent a menu. After a clear match, call add_to_cart with the menu_item_id from the tool, "
+            "the quantity, and an optional line note."
         )
         parts.append(
-            "Hỏi họ có muốn thêm gì không. Dùng update_cart hoặc remove_from_cart nếu họ "
-            "đổi món. Thu thập đủ thông tin theo hình thức nhận, không bịa field. "
-            "Hỏi theo thứ tự: lần đầu tên + địa chỉ + số điện thoại + món muốn đặt → "
-            "rồi mới hỏi mục còn thiếu. Bỏ qua mục đã có. Mỗi khi khách nêu tên, SĐT, ngày, giờ, "
-            "ghi chú, địa chỉ, hoặc SĐT nhận: gọi save_order_details ngay."
+            "Ask if they want anything else. Use update_cart or remove_from_cart if they change items. "
+            "Collect the remaining details for how they will receive the order; do not invent fields. "
+            "Ask in this order: first name + address + phone number + dishes they want, "
+            "then only ask for what is still missing. Skip anything already collected. "
+            "Whenever the caller gives a name, phone, date, time, note, address, or recipient phone: "
+            "call save_order_details immediately."
         )
         if fulfillment in {"pickup", "delivery"}:
-            parts.append("Không hỏi lại giao hàng hay mang về.")
+            parts.append("Do not ask again whether this is delivery or pickup.")
         parts.append(
-            "Giao hàng: gọi set_fulfillment với delivery và địa chỉ nói miệng (bắt buộc). "
-            "Thu tên người đặt, số điện thoại người đặt, ngày giao (YYYY-MM-DD theo múi giờ "
-            "nhà hàng), giờ nhận hàng (HH:MM). Hỏi số điện thoại người nhận nếu khác số đặt; "
-            "không khác thì dùng cùng số. Ghi chú món tùy chọn. Không hỏi phí ship."
+            "Delivery: call set_fulfillment with delivery and the spoken street address (required). "
+            "Collect the orderer's name, orderer's phone, delivery date (YYYY-MM-DD in the restaurant timezone), "
+            "and drop-off time (HH:MM). Ask for a recipient phone if it differs from the orderer's; "
+            "otherwise use the same number. Dish notes are optional. Do not ask about shipping fees."
         )
         parts.append(
-            "Mang về: gọi set_fulfillment với pickup. "
-            "Địa chỉ khách nói dùng để khớp chi nhánh, không phải địa chỉ giao hàng. "
-            "Thu tên người đặt, số điện thoại, ngày lấy món, giờ lấy món. Ghi chú tùy chọn."
+            "Pickup: call set_fulfillment with pickup. "
+            "Use the address the caller said to match the branch, not as a delivery address. "
+            "Collect the orderer's name, phone, pickup date, and pickup time. Notes are optional."
         )
         parts.append(
-            "Thanh toán tiền mặt khi nhận hàng hoặc khi đến lấy; không hỏi số thẻ. "
-            "Đọc lại món, số lượng, tổng tiền nếu có giá, tên, SĐT, ngày giờ, và địa chỉ giao "
-            "hoặc việc họ đến lấy tại chi nhánh (kèm SĐT nhận nếu khác). Chờ đồng ý rồi mới "
-            "create_order với customer_name, phone_number, booking_date, booking_time. "
-            "Sau khi họ xác nhận, BẮT BUỘC gọi create_order trong lượt đó. "
-            "Không nói đơn đã đặt trừ khi create_order trả về ok true. "
-            "Nếu missing_fields, hỏi đúng mục còn thiếu bằng lời thường, không đọc tên field. "
-            "Nếu thất bại, nói thật và không nhận thành công."
+            "Payment is cash on delivery or at pickup; do not ask for a card number. "
+            "Read back the dishes, quantities, total if priced, name, phone, date and time, and the delivery address "
+            "or that they will pick up at the branch (plus a recipient phone if different). Wait for agreement, then "
+            "create_order with customer_name, phone_number, booking_date, booking_time. "
+            "After they confirm, you MUST call create_order in that turn. "
+            "Do not say the order is placed unless create_order returns ok true. "
+            "If missing_fields, ask for the missing item in plain words; do not read field names. "
+            "If it fails, say so and do not claim success."
         )
         if menu_ready:
-            parts.append("Thực đơn đã nạp trong bộ nhớ; vẫn dùng search_menu hoặc list_menu, không đọc hết.")
+            parts.append("The menu is loaded in memory; still use search_menu or list_menu, and do not read it all.")
         if cart_summary:
-            parts.append(f"Giỏ hàng hiện tại: {cart_summary}.")
+            parts.append(f"Current cart: {cart_summary}.")
         else:
-            parts.append("Giỏ hàng đang trống.")
+            parts.append("The cart is empty.")
         if fulfillment == "delivery" and delivery_address:
-            parts.append(f"Hình thức: giao tới {delivery_address}.")
+            parts.append(f"Fulfillment: deliver to {delivery_address}.")
         elif fulfillment == "pickup":
-            parts.append("Hình thức: đến lấy tại chi nhánh đã chọn.")
+            parts.append("Fulfillment: pickup at the selected branch.")
         else:
-            parts.append("Chưa chọn hình thức giao hoặc nhận.")
+            parts.append("Fulfillment is not chosen yet.")
         if order_status:
             parts.append(order_status)
 

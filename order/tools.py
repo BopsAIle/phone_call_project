@@ -31,17 +31,17 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "search_menu",
             "description": (
-                "Tra một món ăn hoặc đồ uống được nói trên thực đơn chi nhánh đã khóa. "
-                "Gọi mỗi khi người gọi nêu tên món, trước khi khẳng định món đó có. "
-                "Không bịa món. Nếu khách hỏi thực đơn / có món gì / những món nào, "
-                "dùng list_menu, không dùng tool này."
+                "Look up a spoken food or drink on the locked branch menu. "
+                "Call this whenever the caller names a dish, before saying that dish exists. "
+                "Do not invent dishes. If the caller asks for the menu or what dishes you have, "
+                "use list_menu, not this tool."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "spoken_name": {
                         "type": "string",
-                        "description": "Lời người gọi, đúng như bản ghi âm.",
+                        "description": "The caller's words, exactly as transcribed.",
                     }
                 },
                 "required": ["spoken_name"],
@@ -53,9 +53,9 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "list_menu",
             "description": (
-                "Lấy thực đơn chi nhánh đã khóa khi khách hỏi có món gì, thực đơn, "
-                "những món nào. GET menu theo branch_id đã khóa. "
-                "Đọc vài tên món với khách; không đọc hết nếu dài; không đọc địa chỉ chi nhánh."
+                "Fetch the locked-branch menu when the caller asks what dishes you have. "
+                "GET the menu for the locked branch_id. "
+                "Read a few dish names; do not read everything if it is long; do not read the branch address."
             ),
             "parameters": {
                 "type": "object",
@@ -68,8 +68,8 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "add_to_cart",
             "description": (
-                "Thêm món vào giỏ. menu_item_id phải lấy từ search_menu, "
-                "không được bịa."
+                "Add a dish to the cart. menu_item_id must come from search_menu; "
+                "do not invent it."
             ),
             "parameters": {
                 "type": "object",
@@ -78,7 +78,7 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                     "quantity": {"type": "integer", "minimum": 1, "maximum": 50},
                     "note": {
                         "type": "string",
-                        "description": "Ghi chú dòng, ví dụ ít cay.",
+                        "description": "Line note, for example less spicy.",
                     },
                 },
                 "required": ["menu_item_id", "quantity"],
@@ -89,7 +89,7 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_cart",
-            "description": "Đổi số lượng một dòng giỏ. menu_item_id phải đã có trong giỏ.",
+            "description": "Change the quantity of a cart line. menu_item_id must already be in the cart.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -97,7 +97,7 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                     "quantity": {"type": "integer", "minimum": 1, "maximum": 50},
                     "note": {
                         "type": "string",
-                        "description": "Ghi chú dòng tùy chọn để phân biệt nếu cùng món được thêm hai lần.",
+                        "description": "Optional line note to tell identical dishes apart if added twice.",
                     },
                 },
                 "required": ["menu_item_id", "quantity"],
@@ -108,7 +108,7 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "remove_from_cart",
-            "description": "Xóa một dòng khỏi giỏ.",
+            "description": "Remove a line from the cart.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -124,8 +124,8 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "set_fulfillment",
             "description": (
-                "Chọn cách người gọi nhận đơn: giao tới một địa chỉ, "
-                "hoặc đến lấy tại chi nhánh đã khóa."
+                "Choose how the caller receives the order: deliver to an address, "
+                "or pick up at the locked branch."
             ),
             "parameters": {
                 "type": "object",
@@ -136,13 +136,13 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                     },
                     "delivery_address": {
                         "type": "string",
-                        "description": "Địa chỉ đường phố nói miệng. Bắt buộc khi giao hàng.",
+                        "description": "Spoken street address. Required for delivery.",
                     },
                     "delivery_phone": {
                         "type": "string",
                         "description": (
-                            "Số điện thoại người nhận nếu khác số người đặt. "
-                            "Chỉ dùng khi giao hàng."
+                            "Recipient phone if it differs from the orderer's. "
+                            "Delivery only."
                         ),
                     },
                 },
@@ -155,9 +155,8 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "save_order_details",
             "description": (
-                "Lưu thông tin khách cho đơn món ngay khi người gọi nêu: "
-                "tên, số điện thoại người đặt, ngày, giờ, ghi chú, "
-                "hoặc số điện thoại người nhận. Không tạo đơn."
+                "Save customer details for the food order as soon as the caller says them: "
+                "name, orderer phone, date, time, note, or recipient phone. Does not create the order."
             ),
             "parameters": {
                 "type": "object",
@@ -167,21 +166,21 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                     "booking_date": {
                         "type": "string",
                         "description": (
-                            "YYYY-MM-DD theo múi giờ nhà hàng, "
-                            "hoặc tomorrow / today / ngày mai / hôm nay."
+                            "YYYY-MM-DD in the restaurant timezone, "
+                            "or tomorrow / today."
                         ),
                     },
                     "booking_time": {
                         "type": "string",
                         "description": (
-                            "HH:MM 24 giờ. Giao hàng: giờ nhận hàng. "
-                            "Mang về: giờ lấy món."
+                            "HH:MM 24-hour. Delivery: drop-off time. "
+                            "Pickup: pickup time."
                         ),
                     },
                     "note": {"type": "string"},
                     "delivery_phone": {
                         "type": "string",
-                        "description": "Số điện thoại người nhận nếu khác số người đặt.",
+                        "description": "Recipient phone if it differs from the orderer's.",
                     },
                 },
             },
@@ -192,10 +191,10 @@ ORDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "create_order",
             "description": (
-                "Đặt đơn món sau khi người gọi đã xác nhận giỏ và đủ thông tin. "
-                "Giao hàng cần địa chỉ; mang về không gửi địa chỉ. "
-                "restaurant_id, branch_id và giỏ lấy từ bộ nhớ phiên. "
-                "Thiếu field thì tool trả missing_fields, không POST."
+                "Place the food order after the caller has confirmed the cart and all details. "
+                "Delivery requires an address; pickup does not send an address. "
+                "restaurant_id, branch_id, and the cart come from session memory. "
+                "If fields are missing the tool returns missing_fields and does not POST."
             ),
             "parameters": {
                 "type": "object",
@@ -205,24 +204,24 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                     "booking_date": {
                         "type": "string",
                         "description": (
-                            "YYYY-MM-DD theo múi giờ nhà hàng, "
-                            "hoặc tomorrow / today / ngày mai / hôm nay. "
-                            "Giao hàng: ngày giao. Mang về: ngày lấy."
+                            "YYYY-MM-DD in the restaurant timezone, "
+                            "or tomorrow / today. "
+                            "Delivery: delivery date. Pickup: pickup date."
                         ),
                     },
                     "booking_time": {
                         "type": "string",
                         "description": (
-                            "HH:MM 24 giờ. Giao hàng: giờ nhận hàng. "
-                            "Mang về: giờ lấy món."
+                            "HH:MM 24-hour. Delivery: drop-off time. "
+                            "Pickup: pickup time."
                         ),
                     },
                     "note": {"type": "string"},
                     "delivery_phone": {
                         "type": "string",
                         "description": (
-                            "Số điện thoại người nhận nếu khác số người đặt. "
-                            "Bỏ trống thì dùng số người đặt."
+                            "Recipient phone if it differs from the orderer's. "
+                            "Leave empty to use the orderer's number."
                         ),
                     },
                 },
@@ -276,8 +275,8 @@ def _menu_preview(session: Any) -> dict[str, Any]:
         "items": preview,
         "truncated": len(available) > _MENU_PREVIEW_LIMIT,
         "note": (
-            "Đọc vài tên món, không đọc hết nếu truncated. "
-            "Không đọc địa chỉ chi nhánh. Hỏi khách muốn món nào."
+            "Read a few dish names; do not read everything if truncated. "
+            "Do not read the branch address. Ask which dish they want."
         ),
     }
 
@@ -357,27 +356,27 @@ def order_missing_fields(session: Any) -> list[str]:
 
 def _missing_spoken(field: str, fulfillment: str) -> str:
     if field == "items":
-        return "món trong giỏ"
+        return "items in the cart"
     if field == "fulfillment":
-        return "giao hàng hay mang về"
+        return "delivery or pickup"
     if field == "delivery_address":
-        return "địa chỉ giao hàng"
+        return "delivery address"
     if field == "customer_name":
-        return "tên người đặt"
+        return "orderer name"
     if field == "customer_phone":
-        return "số điện thoại người đặt"
+        return "orderer phone number"
     if field == "booking_date":
         if fulfillment == "delivery":
-            return "ngày giao hàng"
+            return "delivery date"
         if fulfillment == "pickup":
-            return "ngày lấy món"
-        return "ngày nhận hoặc lấy món"
+            return "pickup date"
+        return "receive or pickup date"
     if field == "booking_time":
         if fulfillment == "delivery":
-            return "giờ nhận hàng"
+            return "drop-off time"
         if fulfillment == "pickup":
-            return "giờ lấy món"
-        return "giờ nhận hoặc lấy món"
+            return "pickup time"
+        return "receive or pickup time"
     return field
 
 
@@ -387,10 +386,10 @@ def _ask_next(missing: list[str], fulfillment: str) -> str:
     field = missing[0]
     spoken = _missing_spoken(field, fulfillment)
     if field == "fulfillment":
-        return "hỏi giao hàng hay mang về"
+        return "ask delivery or pickup"
     if field == "items":
-        return "hỏi khách muốn gọi món gì"
-    return f"hỏi {spoken}"
+        return "ask what they would like to order"
+    return f"ask for {spoken}"
 
 
 def order_status_prompt(session: Any) -> str:
@@ -399,36 +398,36 @@ def order_status_prompt(session: Any) -> str:
     collected: list[str] = []
     name = str(getattr(session, "order_customer_name", "") or "").strip()
     if name:
-        collected.append(f"tên {name}")
+        collected.append(f"name {name}")
     phone = str(getattr(session, "order_customer_phone", "") or "").strip()
     if phone:
-        collected.append(f"SĐT đặt {phone}")
+        collected.append(f"orderer phone {phone}")
     address = str(getattr(session, "delivery_address", "") or "").strip()
     if fulfillment == "delivery" and address:
-        collected.append(f"giao tới {address}")
+        collected.append(f"deliver to {address}")
     delivery_phone = str(getattr(session, "delivery_phone", "") or "").strip()
     if fulfillment == "delivery" and delivery_phone and delivery_phone != phone:
-        collected.append(f"SĐT nhận {delivery_phone}")
+        collected.append(f"recipient phone {delivery_phone}")
     date = str(getattr(session, "order_booking_date", "") or "").strip()
     if date:
-        collected.append(f"ngày {date}")
+        collected.append(f"date {date}")
     time = str(getattr(session, "order_booking_time", "") or "").strip()
     if time:
-        collected.append(f"giờ {time}")
+        collected.append(f"time {time}")
     note = str(getattr(session, "order_note", "") or "").strip()
     if note:
-        collected.append(f"ghi chú {note}")
+        collected.append(f"note {note}")
     parts: list[str] = []
     if missing:
         spoken = ", ".join(_missing_spoken(field, fulfillment) for field in missing)
-        parts.append(f"Thông tin đơn còn thiếu: {spoken}.")
+        parts.append(f"Order details still missing: {spoken}.")
         ask = _ask_next(missing, fulfillment)
         if ask:
-            parts.append(f"Hỏi tiếp: {ask}.")
+            parts.append(f"Ask next: {ask}.")
     else:
-        parts.append("Đã đủ thông tin bắt buộc để đặt đơn sau khi khách xác nhận.")
+        parts.append("All required order details are present; place the order after the caller confirms.")
     if collected:
-        parts.append("Đã thu: " + "; ".join(collected) + ".")
+        parts.append("Already collected: " + "; ".join(collected) + ".")
     return " ".join(parts)
 
 

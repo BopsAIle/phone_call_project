@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from booking.matcher import match_unique_branch_name
 from booking.models import MatchResult
 
 logger = logging.getLogger(__name__)
@@ -22,15 +23,15 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "resolve_branch",
             "description": (
-                "Đưa lời người gọi cho model so với list chi nhánh đang có trong cuộc gọi. "
-                "Gọi mỗi khi người gọi chọn hoặc nêu địa điểm, trước khi khẳng định chi nhánh đó tồn tại."
+                "Compare the caller's words with the branch list in this call. "
+                "Call this whenever the caller chooses or names a place, before saying that branch exists."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "spoken_name": {
                         "type": "string",
-                        "description": "Lời người gọi, đúng như bản ghi âm.",
+                        "description": "The caller's words, exactly as transcribed.",
                     }
                 },
                 "required": ["spoken_name"],
@@ -42,16 +43,16 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "confirm_branch",
             "description": (
-                "Khóa chi nhánh sau khi người gọi xác nhận. branch_id phải lấy từ "
-                "resolve_branch, không được bịa. Khi nói với khách chỉ nêu tên; "
-                "chỉ đọc địa chỉ nếu họ hỏi."
+                "Lock the branch after the caller confirms. branch_id must come from "
+                "resolve_branch; do not invent it. When speaking to the caller, say the name only; "
+                "read the address only if they ask."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "branch_id": {
                         "type": "string",
-                        "description": "UUID chi nhánh trong danh mục.",
+                        "description": "Branch UUID from the catalog.",
                     }
                 },
                 "required": ["branch_id"],
@@ -63,8 +64,8 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "create_booking",
             "description": (
-                "Tạo đặt bàn sau khi người gọi đã xác nhận mọi chi tiết. "
-                "restaurant_id và branch_id lấy từ bộ nhớ phiên, không phải đối số."
+                "Create a table booking after the caller has confirmed every detail. "
+                "restaurant_id and branch_id come from session memory, not as arguments."
             ),
             "parameters": {
                 "type": "object",
@@ -75,13 +76,13 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
                     "booking_date": {
                         "type": "string",
                         "description": (
-                            "Ngày đặt theo múi giờ nhà hàng. "
-                            "YYYY-MM-DD, hoặc tomorrow / today / ngày mai / hôm nay."
+                            "Booking date in the restaurant timezone. "
+                            "YYYY-MM-DD, or tomorrow / today."
                         ),
                     },
                     "booking_time": {
                         "type": "string",
-                        "description": "HH:MM 24 giờ.",
+                        "description": "HH:MM 24-hour time.",
                     },
                     "note": {"type": "string"},
                 },
@@ -287,7 +288,10 @@ class BookingTools:
                 "reason": "no_branches",
                 "available_branches": catalog,
             }
-        if self._matcher is None:
+        unique = match_unique_branch_name(spoken, branches)
+        if unique is not None:
+            matched = unique
+        elif self._matcher is None:
             matched = MatchResult(status="none")
         else:
             matched = await self._matcher.match(spoken, branches)
@@ -331,7 +335,7 @@ class BookingTools:
             "ok": True,
             "locked": True,
             "confirm_name": branch.name,
-            "note": "Chỉ nói tên chi nhánh với khách. Không đọc địa chỉ trừ khi họ hỏi ở đâu.",
+            "note": "Say only the branch name to the caller. Do not read the address unless they ask where it is.",
         }
 
     async def create_booking(self, args: dict[str, Any]) -> dict[str, Any]:

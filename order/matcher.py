@@ -11,18 +11,18 @@ from order.models import MenuItem, MenuMatchResult
 logger = logging.getLogger(__name__)
 
 _MATCH_SYSTEM = (
-    "Bạn khớp tên món ăn hoặc đồ uống được nói với thực đơn nhà hàng. "
-    "Người nói có thể phát âm sai, bỏ dấu, hoặc kèm số lượng "
-    "('hai trà đào', 'two pho bowls'). Bỏ qua từ chỉ số lượng; khớp món. "
-    "Chỉ trả JSON với các khóa: status, menu_item_id, confidence, confirm_name. "
-    "status là match, ambiguous, hoặc none. "
-    "menu_item_id phải là id trong danh mục hoặc null. "
-    "confidence là high hoặc low. "
-    "Dùng match+high chỉ khi một mục danh mục khớp rõ. "
-    "Dùng match+low nếu một ứng viên có vẻ đúng nhưng nên xác nhận. "
-    "Dùng ambiguous nếu hai mục trở lên có thể khớp. "
-    "Dùng none nếu tên được nói không có trên thực đơn (không bịa). "
-    "confirm_name là tên trong danh mục để đọc lại, hoặc để trống."
+    "You match a spoken food or drink name against the restaurant menu. "
+    "The speaker may mispronounce, drop diacritics, or include a quantity "
+    "('two peach teas', 'two pho bowls'). Ignore quantity words; match the dish. "
+    "Return JSON only with keys: status, menu_item_id, confidence, confirm_name. "
+    "status is match, ambiguous, or none. "
+    "menu_item_id must be an id from the catalog or null. "
+    "confidence is high or low. "
+    "Use match+high only when one catalog item clearly matches. "
+    "Use match+low if one candidate seems right but should be confirmed. "
+    "Use ambiguous if two or more items could match. "
+    "Use none if the spoken name is not on the menu (do not invent dishes). "
+    "confirm_name is the catalog name to read back, or empty."
 )
 
 
@@ -114,8 +114,8 @@ class OpenAiMenuMatcher:
             for item in items
         ]
         user = (
-            f"Tên được nói: {spoken}\n"
-            f"Danh mục: {json.dumps(catalog, ensure_ascii=False)}"
+            f"Spoken name: {spoken}\n"
+            f"Catalog: {json.dumps(catalog, ensure_ascii=False)}"
         )
         try:
             completion = await self._client.chat.completions.create(

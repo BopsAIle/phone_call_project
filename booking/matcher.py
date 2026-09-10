@@ -24,22 +24,22 @@ _PLACE_ALIASES: tuple[tuple[re.Pattern[str], str], ...] = (
 _HCM_IN_TEXT = re.compile(r"hồ chí minh|\bhcm\b", re.IGNORECASE)
 
 _MATCH_SYSTEM = (
-    "Bạn chỉ được chọn trong list chi nhánh được gửi kèm. Không tìm nhà hàng ngoài list. "
-    "Ưu tiên khớp TÊN chi nhánh (và name_for_match). Địa chỉ chỉ dùng khi tên không đủ phân biệt. "
-    "HCM, TP HCM, TPHCM, Sài Gòn nghĩa là Hồ Chí Minh. "
-    "Nếu lời nói là HCM / Hồ Chí Minh và có đúng một chi nhánh có HCM hoặc Hồ Chí Minh trong TÊN, "
-    "chọn chi nhánh đó — không chọn chi nhánh khác chỉ vì địa chỉ chứa HCM. "
-    "Nếu lời nói chỉ một mục (ví dụ 'tôi muốn chọn chi nhánh quận 3' khi list có "
-    "Quận 1, Quận 2, Quận 3) thì status=match, lấy đúng mục đó. "
-    "Số quận phải khớp chính xác: Quận 3 không phải Quận 1, Quận 13, hay Quận 30. "
-    "status=ambiguous nếu hai mục trở lên gần như nhau. "
-    "status=none chỉ khi không mục nào liên quan tới lời nói. "
-    "Trả JSON với khóa: status, branch_id, index, confidence, confirm_name. "
-    "branch_id phải là id trong list hoặc null. "
-    "index là số thứ tự 1-based của mục được chọn, hoặc null. "
-    "confidence là high hoặc low. "
-    "confirm_name là tên đúng trong list, hoặc để trống. "
-    "Nếu ambiguous, thêm candidate_ids là các id trong list."
+    "You may only choose from the branch list sent with this request. Do not search restaurants outside the list. "
+    "Prefer matching the branch NAME (and name_for_match). Use the address only when the name is not enough. "
+    "HCM, TP HCM, TPHCM, and Saigon mean Ho Chi Minh. "
+    "If the spoken words are HCM / Ho Chi Minh and exactly one branch has HCM or Ho Chi Minh in its NAME, "
+    "choose that branch — do not choose another branch just because its address contains HCM. "
+    "If the spoken words point to one item (for example 'I want the district 3 branch' when the list has "
+    "District 1, District 2, District 3) then status=match and pick that item. "
+    "District numbers must match exactly: District 3 is not District 1, District 13, or District 30. "
+    "status=ambiguous if two or more items are about equally close. "
+    "status=none only when no item relates to the spoken words. "
+    "Return JSON with keys: status, branch_id, index, confidence, confirm_name. "
+    "branch_id must be an id from the list or null. "
+    "index is the 1-based index of the chosen item, or null. "
+    "confidence is high or low. "
+    "confirm_name is the exact name from the list, or empty. "
+    "If ambiguous, add candidate_ids with ids from the list."
 )
 
 
@@ -63,6 +63,84 @@ def match_named_hcm_branch(spoken: str, branches: list[Branch]) -> Optional[Matc
     if not _name_refers_to_hcm(spoken):
         return None
     hits = [branch for branch in branches if _name_refers_to_hcm(branch.name)]
+    if len(hits) == 1:
+        branch = hits[0]
+        return MatchResult(
+            status="match",
+            branch_id=branch.id,
+            confidence="high",
+            confirm_name=branch.name,
+        )
+    if len(hits) > 1:
+        return MatchResult(
+            status="ambiguous",
+            confidence="low",
+            candidate_ids=tuple(branch.id for branch in hits),
+        )
+    return None
+
+
+_TOKEN_SPLIT = re.compile(r"[^\w]+", re.UNICODE)
+_GENERIC_TOKENS = frozenset(
+    {
+        "chi",
+        "nhánh",
+        "nhanh",
+        "quận",
+        "quan",
+        "tôi",
+        "toi",
+        "mình",
+        "minh",
+        "cho",
+        "muốn",
+        "muon",
+        "chọn",
+        "chon",
+        "cái",
+        "cai",
+        "gần",
+        "gan",
+        "branch",
+        "please",
+        "like",
+        "the",
+        "and",
+        "for",
+    }
+)
+
+
+def match_unique_branch_name(spoken: str, branches: list[Branch]) -> Optional[MatchResult]:
+    """Lock when the caller names one branch uniquely (e.g. 'KFC'). No LLM."""
+    spoken_cf = (spoken or "").strip().casefold()
+    if not spoken_cf or not branches:
+        return None
+    hits: list[Branch] = []
+    for branch in branches:
+        name_cf = (branch.name or "").strip().casefold()
+        if not name_cf:
+            continue
+        if name_cf == spoken_cf or name_cf in spoken_cf:
+            hits.append(branch)
+            continue
+        if len(spoken_cf) >= 3 and spoken_cf not in _GENERIC_TOKENS and spoken_cf in name_cf:
+            hits.append(branch)
+    if not hits:
+        tokens = [
+            token
+            for token in _TOKEN_SPLIT.split(spoken_cf)
+            if len(token) >= 3 and token not in _GENERIC_TOKENS
+        ]
+        for token in tokens:
+            token_hits = [
+                branch
+                for branch in branches
+                if token in (branch.name or "").casefold()
+            ]
+            if len(token_hits) == 1:
+                hits = token_hits
+                break
     if len(hits) == 1:
         branch = hits[0]
         return MatchResult(
@@ -209,16 +287,19 @@ class OpenAiBranchMatcher:
         named = match_named_hcm_branch(spoken, branches)
         if named is not None:
             return named
+        unique = match_unique_branch_name(spoken, branches)
+        if unique is not None:
+            return unique
         catalog = _catalog_for_judge(branches)
         expanded = expand_place_aliases(spoken)
         user = (
-            "List chi nhánh (chỉ được chọn từ đây):\n"
+            "Branch list (choose only from here):\n"
             f"{json.dumps(catalog, ensure_ascii=False)}\n"
-            f"Lời người gọi: {spoken}\n"
+            f"Caller said: {spoken}\n"
         )
         if expanded != spoken:
-            user += f"Viết tắt địa danh đã mở rộng: {expanded}\n"
-        user += "Hãy đánh giá mục nào trong list giống với chi nhánh người gọi nói."
+            user += f"Expanded place alias: {expanded}\n"
+        user += "Decide which item in the list matches the branch the caller named."
         try:
             completion = await self._client.chat.completions.create(
                 model=self._model,
