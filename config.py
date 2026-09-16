@@ -50,6 +50,29 @@ class Settings(BaseModel):
     dtmf_menu_timeout_seconds: int = Field(default=7, ge=1)
     dtmf_debounce_ms: int = Field(default=500, ge=0)
     dtmf_max_invalid: int = Field(default=2, ge=0)
+    # Legacy /v1/bridge socket (telephony backend + browser demo). Off = Telnyx only.
+    bridge_enabled: bool = True
+    # --- Telnyx Call Control v2 + Media Streaming ---
+    telnyx_enabled: bool = False
+    telnyx_api_key: str = ""
+    telnyx_api_base: str = "https://api.telnyx.com/v2"
+    telnyx_public_key: str = ""  # base64 Ed25519, from the Telnyx portal
+    telnyx_webhook_tolerance_seconds: int = Field(default=300, ge=0)
+    telnyx_stream_url: str = ""  # wss://<public-host>/telnyx/media
+    telnyx_stream_token: str = ""  # appended as ?token= ; Telnyx does not sign the WS
+    telnyx_stream_codec: str = "L16"
+    telnyx_stream_track: str = "inbound_track"
+    telnyx_bidi_codec: str = "L16"
+    telnyx_bidi_sampling_rate: int = Field(default=16_000, ge=8_000)
+    telnyx_frame_ms: int = Field(default=20, ge=20)
+    telnyx_default_locale: str = "en"
+    telnyx_default_timezone: str = "UTC"
+    telnyx_default_store_name: str = ""
+    telnyx_greeting: str = "Hello, you have reached our automated assistant."
+    telnyx_mark_timeout_seconds: float = Field(default=20.0, gt=0)
+    # RFC 2586 says L16 is big-endian; set false if the carrier sends little-endian
+    # (symptom: white noise both directions, no error anywhere).
+    telnyx_l16_byteswap: bool = True
 
 
 def load_settings() -> Settings:
@@ -80,4 +103,25 @@ def load_settings() -> Settings:
         dtmf_menu_timeout_seconds=int(os.getenv("DTMF_MENU_TIMEOUT_SECONDS", "7")),
         dtmf_debounce_ms=int(os.getenv("DTMF_DEBOUNCE_MS", "500")),
         dtmf_max_invalid=int(os.getenv("DTMF_MAX_INVALID", "2")),
+        bridge_enabled=_env_bool("BRIDGE_ENABLED", True),
+        telnyx_enabled=_env_bool("TELNYX_ENABLED", False),
+        telnyx_api_key=os.getenv("TELNYX_API_KEY", "").strip(),
+        telnyx_api_base=os.getenv("TELNYX_API_BASE", "https://api.telnyx.com/v2").strip(),
+        telnyx_public_key=os.getenv("TELNYX_PUBLIC_KEY", "").strip(),
+        telnyx_webhook_tolerance_seconds=int(os.getenv("TELNYX_WEBHOOK_TOLERANCE_SECONDS", "300")),
+        telnyx_stream_url=os.getenv("TELNYX_STREAM_URL", "").strip(),
+        telnyx_stream_token=os.getenv("TELNYX_STREAM_TOKEN", "").strip(),
+        telnyx_stream_codec=os.getenv("TELNYX_STREAM_CODEC", "L16").strip() or "L16",
+        telnyx_stream_track=os.getenv("TELNYX_STREAM_TRACK", "inbound_track").strip() or "inbound_track",
+        telnyx_bidi_codec=os.getenv("TELNYX_BIDI_CODEC", "L16").strip() or "L16",
+        telnyx_bidi_sampling_rate=int(os.getenv("TELNYX_BIDI_SAMPLING_RATE", "16000")),
+        telnyx_frame_ms=int(os.getenv("TELNYX_FRAME_MS", "20")),
+        telnyx_default_locale=os.getenv("TELNYX_DEFAULT_LOCALE", "en").strip() or "en",
+        telnyx_default_timezone=os.getenv("TELNYX_DEFAULT_TIMEZONE", "UTC").strip() or "UTC",
+        telnyx_default_store_name=os.getenv("TELNYX_DEFAULT_STORE_NAME", "").strip(),
+        telnyx_greeting=os.getenv(
+            "TELNYX_GREETING", "Hello, you have reached our automated assistant."
+        ).strip(),
+        telnyx_mark_timeout_seconds=float(os.getenv("TELNYX_MARK_TIMEOUT_SECONDS", "20")),
+        telnyx_l16_byteswap=_env_bool("TELNYX_L16_BYTESWAP", True),
     )

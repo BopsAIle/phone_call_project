@@ -69,7 +69,9 @@ ORDER_TOOLS: list[dict[str, Any]] = [
             "name": "add_to_cart",
             "description": (
                 "Add a dish to the cart. menu_item_id must come from search_menu; "
-                "do not invent it."
+                "do not invent it. If you have not called search_menu for this dish yet, "
+                "call it first — a made-up id may not resolve and the dish would never "
+                "reach the cart."
             ),
             "parameters": {
                 "type": "object",
@@ -177,6 +179,14 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                             "Pickup: pickup time."
                         ),
                     },
+                    "use_caller_number": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the caller agrees that the number they are calling "
+                            "from is the one to use. The number is then taken from the carrier; "
+                            "do not also send phone_number."
+                        ),
+                    },
                     "note": {"type": "string"},
                     "delivery_phone": {
                         "type": "string",
@@ -216,6 +226,14 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                             "Pickup: pickup time."
                         ),
                     },
+                    "use_caller_number": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the caller agrees that the number they are calling "
+                            "from is the one to use. The number is then taken from the carrier; "
+                            "do not also send phone_number."
+                        ),
+                    },
                     "note": {"type": "string"},
                     "delivery_phone": {
                         "type": "string",
@@ -227,7 +245,6 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                 },
                 "required": [
                     "customer_name",
-                    "phone_number",
                     "booking_date",
                     "booking_time",
                 ],
@@ -239,6 +256,10 @@ ORDER_TOOLS: list[dict[str, Any]] = [
 ORDER_TOOL_NAMES = frozenset(
     fn["function"]["name"] for fn in ORDER_TOOLS if "function" in fn
 )
+
+
+def _normalize_item_name(value: str) -> str:
+    return " ".join((value or "").strip().casefold().split())
 
 
 def _parse_quantity(raw: Any) -> Optional[int]:
@@ -431,12 +452,30 @@ def order_status_prompt(session: Any) -> str:
     return " ".join(parts)
 
 
+def _caller_number(session: Any) -> str:
+    return str(getattr(session, "from_number", "") or "").strip()
+
+
 def _apply_order_details(session: Any, args: dict[str, Any]) -> list[str]:
     invalid: list[str] = []
     name = str(args.get("customer_name") or "").strip()
     if name:
         session.order_customer_name = name
     raw_phone = str(args.get("phone_number") or args.get("customer_phone") or "")
+    if args.get("use_caller_number") is True:
+        # The caller said yes to "is this number the right one?". Take the number from
+        # the carrier instead of from digits the model transcribed back to itself.
+        caller = _caller_number(session)
+        if caller:
+            phone = normalize_customer_phone(caller)
+            if phone:
+                session.order_customer_phone = phone
+                logger.info("Saved caller ID as orderer phone: %s", phone)
+                raw_phone = ""
+            else:
+                invalid.append("use_caller_number")
+        else:
+            invalid.append("use_caller_number")
     if raw_phone.strip():
         phone = normalize_customer_phone(raw_phone)
         if phone:
@@ -660,6 +699,35 @@ class OrderTools:
             payload["candidates"] = names
         return payload
 
+    async def _recover_menu_item(self, spoken: str) -> Optional[MenuItem]:
+        """Turn an invented id / spoken dish name back into a real menu item, or None."""
+        spoken = (spoken or "").strip()
+        if not spoken:
+            return None
+        items = list(getattr(self._session, "menu", None) or [])
+        if not items:
+            return None
+        readable = spoken.replace("-", " ").replace("_", " ").strip()
+        wanted = _normalize_item_name(readable)
+        if wanted:
+            exact = [item for item in items if _normalize_item_name(item.name) == wanted]
+            if len(exact) == 1:
+                logger.info("add_to_cart recovered %r by name -> %s", spoken, exact[0].name)
+                return exact[0]
+        if self._matcher is None:
+            return None
+        try:
+            matched = await self._matcher.match(readable, items)
+        except Exception:
+            logger.exception("add_to_cart recovery match failed for %r", spoken)
+            return None
+        if matched.status != "match" or not matched.menu_item_id:
+            return None
+        item = _menu_by_id(self._session).get(matched.menu_item_id)
+        if item is not None:
+            logger.info("add_to_cart recovered %r by matcher -> %s", spoken, item.name)
+        return item
+
     async def add_to_cart(self, args: dict[str, Any]) -> dict[str, Any]:
         self._mark_order_intent()
         load_error = await self._ensure_menu()
@@ -673,7 +741,22 @@ class OrderTools:
             return {"ok": False, "error": "invalid_quantity"}
         item = _menu_by_id(session).get(menu_item_id)
         if item is None:
-            return {"ok": False, "error": "unknown_item"}
+            # Models routinely invent a slug ("burger-zinger-combo") instead of calling
+            # search_menu first. Rejecting that leaves the cart empty, the caller hears a
+            # confirmation anyway, and create_order later dies on empty_cart. So try to
+            # recover the real item from whatever they passed.
+            item = await self._recover_menu_item(menu_item_id)
+        if item is None:
+            payload: dict[str, Any] = {
+                "ok": False,
+                "error": "unknown_item",
+                "next_step": "call search_menu with the dish name the caller said, then add_to_cart with the id it returns",
+            }
+            preview = _menu_preview(session)
+            names = preview.get("items") if isinstance(preview, dict) else None
+            if names:
+                payload["candidates"] = names
+            return payload
         if not item.available:
             return {"ok": False, "error": "unavailable", "confirm_name": item.name}
         cart: list[CartLine] = list(getattr(session, "cart", None) or [])

@@ -72,6 +72,14 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "customer_name": {"type": "string"},
                     "phone_number": {"type": "string"},
+                    "use_caller_number": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the caller agrees that the number they are calling "
+                            "from is the one to use. The number is then taken from the carrier; "
+                            "do not also send phone_number."
+                        ),
+                    },
                     "party_size": {"type": "integer", "minimum": 1, "maximum": 50},
                     "booking_date": {
                         "type": "string",
@@ -88,7 +96,6 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
                 },
                 "required": [
                     "customer_name",
-                    "phone_number",
                     "party_size",
                     "booking_date",
                     "booking_time",
@@ -214,7 +221,16 @@ def normalize_booking_time(raw: str) -> Optional[str]:
 
 
 def normalize_customer_phone(raw: str) -> str:
-    return "".join(ch for ch in (raw or "") if ch.isdigit())
+    """Digits only, and Vietnamese E.164 back to the national form staff can dial.
+
+    Caller ID arrives as +84912345678, and a model reading it back gives the same
+    digits. The restaurant expects 0912345678, so 84 + 9 or 10 digits becomes 0 + rest.
+    Other country codes are left alone; we cannot guess their national format.
+    """
+    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if digits.startswith("84") and len(digits) in {11, 12}:
+        return "0" + digits[2:]
+    return digits
 
 
 def _catalog_public(session: Any) -> list[dict[str, str]]:
@@ -289,7 +305,7 @@ class BookingTools:
                 "available_branches": catalog,
             }
         unique = match_unique_branch_name(spoken, branches)
-        if unique is not None:
+        if unique is not None and (unique.confidence == "high" or self._matcher is None):
             matched = unique
         elif self._matcher is None:
             matched = MatchResult(status="none")
@@ -358,9 +374,16 @@ class BookingTools:
             }
 
         customer_name = str(args.get("customer_name") or "").strip()
-        phone_number = normalize_customer_phone(
-            str(args.get("phone_number") or args.get("customer_phone") or "")
-        )
+        if args.get("use_caller_number") is True:
+            # Caller agreed to use the number they are ringing from; take it from the
+            # carrier rather than from digits the model read back to itself.
+            phone_number = normalize_customer_phone(str(getattr(session, "from_number", "") or ""))
+            if phone_number:
+                logger.info("Saved caller ID as booking phone: %s", phone_number)
+        else:
+            phone_number = normalize_customer_phone(
+                str(args.get("phone_number") or args.get("customer_phone") or "")
+            )
         note = str(args.get("note") or "").strip()
         tz = str(getattr(session, "timezone", "") or "UTC")
         booking_date, booking_time = resolve_booking_when(

@@ -1,11 +1,11 @@
 # Frontend thu âm — demo trình duyệt cho AI Bridge
 
-Folder này **tách khỏi** pipeline Python. Nó giả lập phía “backend điện thoại”: mở micro, gửi PCM 16 kHz lên `/v1/bridge`, phát audio agent, và xóa hàng phát khi nhận `interrupt`.
+Folder này **tách khỏi** pipeline Python. Nó giả lập phía “backend điện thoại”: mở micro, gửi PCM 24 kHz lên `/v1/bridge`, phát audio agent, và xóa hàng phát khi nhận `interrupt`.
 
 Không đụng Twilio / mu-law. Dùng tai nghe khi test — loa máy sẽ lọt mic và dễ kích barge-in giả.
 
 ```
-Trình duyệt (folder này)  --WebSocket PCM16 16 kHz-->  AI Bridge (python app.py)
+Trình duyệt (folder này)  --WebSocket PCM16 24 kHz-->  AI Bridge (python app.py)
 ```
 
 ## Chạy
@@ -56,12 +56,12 @@ Khớp [hợp đồng AI Bridge](../documents/backend_contract/ai-bridge-contrac
 | Hướng | Frame | Nội dung |
 | --- | --- | --- |
 | UI → AI | Text | `session.init` (`callId`, `storeName`, `toNumber`, `timezone`, `locale`, `greeting`) |
-| UI → AI | Binary | PCM16 LE mono 16 kHz, ~100 ms / 3200 byte |
+| UI → AI | Binary | PCM16 LE mono 24 kHz, ~100 ms / 4800 byte |
 | AI → UI | Binary | PCM agent, cùng định dạng |
 | AI → UI | Text | `{"event":"interrupt"}` khi barge-in — UI dừng playback ngay |
 | AI → UI | Text | `{"event":"order.created"}` khi `POST /menu/delivery/ai` (hoặc takeout) 2xx — UI hiện **Đã đặt hàng thành công** |
 
-Micro máy thường 44.1/48 kHz; `src/pcm.ts` resample tuyến tính xuống 16 kHz rồi đóng frame 3200 byte.
+Micro máy thường 44.1/48 kHz; `src/pcm.ts` resample tuyến tính xuống 24 kHz rồi đóng frame 4800 byte. Wire 24 kHz khớp đúng tần số OpenAI STT/TTS nên bridge không phải up/downsample nữa.
 
 ## Cấu trúc
 

@@ -24,7 +24,7 @@ audio back. That is the whole surface.
 flowchart LR
     Caller["PSTN caller"] <--> Twilio
     Twilio <-->|"8 kHz mu-law, 20 ms"| BE["Telephony backend (you)"]
-    BE <-->|"16 kHz PCM16 WebSocket"| AI["AI Bridge (us)"]
+    BE <-->|"24 kHz PCM16 WebSocket"| AI["AI Bridge (us)"]
 ```
 
 You never see OpenAI, sample-rate conversion, voice activity detection, turn
@@ -68,14 +68,14 @@ No envelope, no length prefix, no base64.
 | Direction | Frame | Payload |
 |---|---|---|
 | You → us | Text | JSON `session.init` |
-| You → us | Binary | Caller audio, PCM16 LE mono 16 kHz |
+| You → us | Binary | Caller audio, PCM16 LE mono 24 kHz |
 | Us → you | Binary | Agent audio, same format |
 | Us → you | Text | `{"event":"interrupt"}` on barge-in |
 
-**Audio format, both directions:** 16.000 Hz, signed PCM16, little-endian,
-mono, no header, 32.000 bytes per second.
+**Audio format, both directions:** 24.000 Hz, signed PCM16, little-endian,
+mono, no header, 48.000 bytes per second.
 
-**Inbound sizing.** The contract specifies ~100 ms / 3.200-byte frames and that
+**Inbound sizing.** The contract specifies ~100 ms / 4.800-byte frames and that
 is what we expect, but we do not enforce it — send any size and we will handle
 it, including a frame that ends on an odd byte (we hold the stray byte and
 prepend it to your next frame rather than dropping it). You do not need to
@@ -252,8 +252,8 @@ connect   wss://<host>/v1/bridge      Authorization: Bearer <AI_BRIDGE_TOKEN>
 health    GET /health                 {"status":"ok"}
 
 you  →  us    text    {"event":"session.init", callId, storeName, toNumber, timezone, locale, greeting}
-you  →  us    binary  caller PCM16 LE mono 16 kHz, ~100 ms / 3.200 bytes
-us   →  you   binary  agent PCM16 LE mono 16 kHz, arbitrary size, whole samples
+you  →  us    binary  caller PCM16 LE mono 24 kHz, ~100 ms / 4.800 bytes
+us   →  you   binary  agent PCM16 LE mono 24 kHz, arbitrary size, whole samples
 us   →  you   text    {"event":"interrupt"}        ← flush your Twilio buffer
 
 close 1008    bad or missing token

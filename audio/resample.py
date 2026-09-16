@@ -5,7 +5,9 @@ from __future__ import annotations
 import numpy as np
 import soxr
 
-BRIDGE_RATE = 16_000
+# Narrowband (8/16 kHz telephony-style) rate. The bridge wire itself now runs
+# at 24 kHz (OPENAI_RATE); this constant is only for generic resampling helpers.
+NARROWBAND_RATE = 16_000
 OPENAI_RATE = 24_000
 
 ## buffer vẫn có thể 

@@ -33,7 +33,17 @@ _MATCH_SYSTEM = (
     "District 1, District 2, District 3) then status=match and pick that item. "
     "District numbers must match exactly: District 3 is not District 1, District 13, or District 30. "
     "status=ambiguous if two or more items are about equally close. "
-    "status=none only when no item relates to the spoken words. "
+    "The caller must actually be naming a PLACE. Brand words inside a branch name are not "
+    "enough on their own: 'I want a pizza', 'some coffee', 'fried chicken' name FOOD, not a "
+    "branch, even when a branch is called Pizza Hut or Highlands Coffee — return status=none. "
+    "Words about the service rather than the place ('delivery', 'pickup', 'book a table', "
+    "'I pressed 3') are status=none. Greetings, names, dates, times and bare confirmations are "
+    "status=none. "
+    "An address the caller gives is still a place: if a street, house number or area fits exactly "
+    "one branch, that is status=match with high confidence. It is status=ambiguous only when two or "
+    "more branches sit on it — 'Hoang Quoc Viet' with a KFC and a Lotteria on it lists both, but "
+    "'106 Hoang Quoc Viet' picks the branch at number 106. "
+    "status=none whenever the spoken words do not point at a place in the list. "
     "Return JSON with keys: status, branch_id, index, confidence, confirm_name. "
     "branch_id must be an id from the list or null. "
     "index is the 1-based index of the chosen item, or null. "
@@ -139,8 +149,15 @@ def match_unique_branch_name(spoken: str, branches: list[Branch]) -> Optional[Ma
                 if token in (branch.name or "").casefold()
             ]
             if len(token_hits) == 1:
-                hits = token_hits
-                break
+                # One word of a longer sentence landed inside one branch name. That is how
+                # "I want a pizza" used to lock Pizza Hut and "some coffee" locked Highlands
+                # Coffee. Weak evidence: report it low so the LLM matcher gets the final say.
+                return MatchResult(
+                    status="match",
+                    branch_id=token_hits[0].id,
+                    confidence="low",
+                    confirm_name=token_hits[0].name,
+                )
     if len(hits) == 1:
         branch = hits[0]
         return MatchResult(
@@ -288,7 +305,7 @@ class OpenAiBranchMatcher:
         if named is not None:
             return named
         unique = match_unique_branch_name(spoken, branches)
-        if unique is not None:
+        if unique is not None and unique.confidence == "high":
             return unique
         catalog = _catalog_for_judge(branches)
         expanded = expand_place_aliases(spoken)

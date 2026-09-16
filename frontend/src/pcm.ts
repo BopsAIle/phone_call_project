@@ -29,8 +29,8 @@ export function rms(samples: Float32Array): number {
 }
 
 /**
- * Linear resample across chunk boundaries so 48 kHz (typical mic) → 16 kHz
- * without splitting a sample at the join.
+ * Linear resample across chunk boundaries so the mic rate (typically 48 kHz)
+ * → SAMPLE_RATE (24 kHz wire) without splitting a sample at the join.
  */
 export class LinearResampler {
   private buf: number[] = [];

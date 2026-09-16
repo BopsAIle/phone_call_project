@@ -5,8 +5,15 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this._chunks = [];
     this._samples = 0;
   }
-  process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
+  process(inputs, outputs) {
+    const input = inputs[0];
+    const output = outputs[0];
+    const ch =
+      (input && (input[0] || input[1])) ||
+      null;
+    if (ch && output && output[0]) {
+      output[0].set(ch);
+    }
     if (!ch || ch.length === 0) return true;
     this._chunks.push(new Float32Array(ch));
     this._samples += ch.length;
@@ -31,6 +38,15 @@ export type CaptureHandlers = {
   onAudio: (samples: Float32Array, sampleRate: number) => void;
 };
 
+const WORKLET_OPTIONS: AudioWorkletNodeOptions = {
+  numberOfInputs: 1,
+  numberOfOutputs: 1,
+  outputChannelCount: [1],
+  channelCount: 1,
+  channelCountMode: "explicit",
+  channelInterpretation: "discrete",
+};
+
 export class MicCapture {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
@@ -51,9 +67,12 @@ export class MicCapture {
   async start(handlers: CaptureHandlers): Promise<void> {
     await this.stop();
     try {
+      // Keep AEC off: Chrome echoCancellation + speaker TTS often ducks the
+      // caller after playback, so OpenAI VAD never fires. Loopback is gated
+      // in main.ts (silence while the agent is playing + a short echo tail).
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
+          echoCancellation: false,
           noiseSuppression: true,
           autoGainControl: true,
           channelCount: 1,
@@ -87,12 +106,15 @@ export class MicCapture {
       const url = URL.createObjectURL(blob);
       await context.audioWorklet.addModule(url);
       URL.revokeObjectURL(url);
-      const node = new AudioWorkletNode(context, "capture-processor");
+      const node = new AudioWorkletNode(context, "capture-processor", WORKLET_OPTIONS);
       this.worklet = node;
       node.port.onmessage = (event: MessageEvent<Float32Array>) => {
-        handlers.onAudio(event.data, context.sampleRate);
+        const data = event.data;
+        if (!(data instanceof Float32Array) || data.length === 0) return;
+        handlers.onAudio(data, context.sampleRate);
       };
-      analyser.connect(node);
+      // Fan-out from source: analyser is viz-only and must not sit on the send path.
+      source.connect(node);
       node.connect(silent);
       silent.connect(context.destination);
     } catch {
@@ -102,7 +124,7 @@ export class MicCapture {
         const input = event.inputBuffer.getChannelData(0);
         handlers.onAudio(new Float32Array(input), context.sampleRate);
       };
-      analyser.connect(proc);
+      source.connect(proc);
       proc.connect(silent);
       silent.connect(context.destination);
     }

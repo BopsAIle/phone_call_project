@@ -1,11 +1,11 @@
-"""OpenAI TTS: stream PCM 24 kHz, downsample to 16 kHz, yield whole samples."""
+"""OpenAI TTS: stream native 24 kHz PCM straight to the 24 kHz wire (no resample)."""
 ## Chuyển câu nói thành audio giọng AI
 from __future__ import annotations
 
 import logging
 from typing import Any, AsyncIterator, Callable, Protocol
 
-from audio.resample import BRIDGE_RATE, OPENAI_RATE, StreamResampler
+from audio.resample import even_pcm16
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class OpenAiTts:
     ) -> AsyncIterator[bytes]:
         if not text.strip():
             return
-        resampler = StreamResampler(OPENAI_RATE, BRIDGE_RATE)
+        leftover = bytearray()
         try:
             async with self._client.audio.speech.with_streaming_response.create(
                 **self._speech_kwargs(text.strip(), locale),
@@ -71,13 +71,10 @@ class OpenAiTts:
                 async for chunk in response.iter_bytes(chunk_size=self._chunk_bytes):
                     if should_abort():
                         return
-                    pcm16 = resampler.process(chunk)
+                    # Native 24 kHz already matches the wire; only keep whole samples.
+                    pcm16 = even_pcm16(chunk, leftover)
                     if pcm16:
                         yield pcm16
-            if not should_abort():
-                tail = resampler.flush()
-                if tail:
-                    yield tail
         except Exception:
             logger.exception("TTS failed for %r", text[:80])
             raise

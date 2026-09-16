@@ -270,7 +270,7 @@ Reader: GET pointer → đọc generation đó. Session sau này giữ `cache_ge
 `[turn/barge_in.py](../turn/barge_in.py)` `OutboundGate`
 
 - `bytes_sent`, `first_frame_at`
-- Helper `remaining_playback_seconds` (32000 byte/s + lead 0.06s + `CALL_END_GRACE_MS`)
+- Helper `remaining_playback_seconds` (48000 byte/s + lead 0.06s + `CALL_END_GRACE_MS`)
 
 Sau `TurnPlayer.finish()`:
 

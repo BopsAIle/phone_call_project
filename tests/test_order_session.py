@@ -332,7 +332,7 @@ async def test_create_delivery_order_sends_success_event() -> None:
     events = [e for e in _control_events(ws) if e.get("event") == "order.created"]
     assert len(events) == 1
     event = events[0]
-    assert event["message"] == "Đã đặt hàng thành công"
+    assert event["message"] == "Order placed successfully"
     assert event["fulfillment"] == "delivery"
     assert event["orderId"] == "ord-1"
     assert event["customerName"] == "Nguyễn Văn A"

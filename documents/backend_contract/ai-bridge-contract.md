@@ -22,7 +22,7 @@ và ở [§10](#10-câu-hỏi-mở). Backend vẫn cần ack các mục sở h�
 flowchart LR
     Caller["Người gọi PSTN"] <--> Twilio
     Twilio <-->|"8 kHz mu-law, 20 ms"| Backend["Backend điện thoại"]
-    Backend <-->|"16 kHz PCM16 WebSocket"| AI["Dịch vụ AI"]
+    Backend <-->|"24 kHz PCM16 WebSocket"| AI["Dịch vụ AI"]
 ```
 
 ### Team AI sở hữu
@@ -37,7 +37,7 @@ flowchart LR
 ### Backend sở hữu
 
 - Điện thoại Twilio: voice webhook, TwiML, và socket Media Streams
-- Đổi codec: mu-law ↔ PCM, resample 8 kHz ↔ 16 kHz
+- Đổi codec: mu-law ↔ PCM, resample 8 kHz ↔ 24 kHz
 - Cắt frame: đúng frame 20 ms Twilio yêu cầu
 - **Buffer phát của Twilio** — kể cả flush khi barge-in
 - Bản ghi cuộc gọi trong database
@@ -71,7 +71,7 @@ envelope, không length prefix, không base64. **Team AI: đồng ý.**
 
 | Loại frame WebSocket | Mang |
 |---|---|
-| **Binary** | Byte audio thô — PCM16 mono 16 kHz, little-endian |
+| **Binary** | Byte audio thô — PCM16 mono 24 kHz, little-endian |
 | **Text** | Message điều khiển JSON (xem [§4](#4-tham-chiếu-message)) |
 
 Cố ý như vậy. Base64-trong-JSON tốn thêm ~33% băng thông và một bước decode
@@ -161,8 +161,8 @@ Gửi một lần, ngay sau khi socket mở.
 
 #### Audio (frame binary)
 
-Audio người gọi. PCM16 mono 16 kHz, little-endian. ~100 ms mỗi frame
-(3.200 byte). Xem [§5](#5-định-dạng-audio).
+Audio người gọi. PCM16 mono 24 kHz, little-endian. ~100 ms mỗi frame
+(4.800 byte). Xem [§5](#5-định-dạng-audio).
 
 ### AI → Backend
 
@@ -216,18 +216,18 @@ Frontend demo dùng event này để hiện “Đã đặt hàng thành công”
 
 ## 5. Định dạng audio
 
-**Cả hai chiều: 16 kHz, PCM16 (signed 16-bit), mono, little-endian.**
+**Cả hai chiều: 24 kHz, PCM16 (signed 16-bit), mono, little-endian.**
 
 Không header, không container — sample thô. Một frame binary là số nguyên
 sample; không bao giờ cắt một sample xuyên hai frame.
 
 | | Giá trị |
 |---|---|
-| Sample rate | 16.000 Hz |
+| Sample rate | 24.000 Hz |
 | Encoding | PCM16 signed, little-endian |
 | Channels | 1 (mono) |
-| Byte mỗi giây | 32.000 |
-| Kích thước frame Backend → AI | ~100 ms = 1.600 sample = **3.200 byte**. **Team AI: chấp nhận.** |
+| Byte mỗi giây | 48.000 |
+| Kích thước frame Backend → AI | ~100 ms = 2.400 sample = **4.800 byte**. **Team AI: chấp nhận.** |
 | Kích thước frame AI → Backend | Tùy ý. Backend cắt lại thành 20 ms của Twilio. |
 
 ### Về kích thước batch 100 ms
@@ -245,10 +245,10 @@ cuộc gọi thật cho thấy đó là nút thắt.
 ### Ghi chú về chất lượng audio
 
 Người gọi tới qua PSTN dạng G.711 mu-law 8 kHz. **Không có nội dung audio
-trên 4 kHz** — mạng điện thoại không mang nó. Backend upsample lên 16 kHz
-bằng bộ lọc chống alias vì bạn xin input 16 kHz, nhưng không thêm thông
+trên 4 kHz** — mạng điện thoại không mang nó. Backend upsample lên 24 kHz
+bằng bộ lọc chống alias vì bạn xin input 24 kHz, nhưng không thêm thông
 tin. Đừng kỳ vọng giọng wideband, và đừng tune model trên audio studio
-16 kHz rồi cho rằng kết quả chuyển được.
+24 kHz rồi cho rằng kết quả chuyển được.
 
 Ngược lại cũng vậy: thứ bạn gửi bị downsample xuống 8 kHz và encode mu-law
 trước khi tới người gọi. Synth trên 8 kHz là công vô ích ở đầu này.
@@ -413,10 +413,10 @@ ack các mục sở hữu chung. Spec process AI:
 
 | # | Câu hỏi | Chủ sở hữu | Trạng thái | Team AI trả lời |
 |---|---|---|---|---|
-| 1 | Xác nhận frame binary cho audio / frame text cho JSON (§2) | Team AI | **Đề xuất** | **Đồng ý.** Binary = PCM16 16 kHz thô. Text = JSON điều khiển. Không envelope, không base64 trên socket này. |
+| 1 | Xác nhận frame binary cho audio / frame text cho JSON (§2) | Team AI | **Đề xuất** | **Đồng ý.** Binary = PCM16 24 kHz thô. Text = JSON điều khiển. Không envelope, không base64 trên socket này. |
 | 2 | Xác nhận URL WebSocket và schema auth (§2) | Team AI | **Đề xuất** | **Bearer** trong `Authorization` lúc handshake. URL do team AI cấp, backend lưu `AI_BRIDGE_URL`. Placeholder: `wss://<host>/v1/bridge` đến khi host được deploy. |
 | 3 | State hội thoại có resume được sau socket đứt, khóa theo `callId` không? (§2) | Team AI | **Đề xuất** | **v1 không resume.** Reconnect + `session.init` mới = history rỗng và chào lại. `callId` chỉ khớp log. State sống trong RAM và chết cùng socket hoặc process. |
-| 4 | Batch input ~100 ms có chấp nhận được, khi nó nằm trước VAD của bạn? (§5) | Team AI | **Đề xuất** | **Có.** VAD là OpenAI `server_vad` phía AI. 100 ms thêm tối đa ~100 ms vào barge-in. Giữ frame 3.200 byte. |
+| 4 | Batch input ~100 ms có chấp nhận được, khi nó nằm trước VAD của bạn? (§5) | Team AI | **Đề xuất** | **Có.** VAD là OpenAI `server_vad` phía AI. 100 ms thêm tối đa ~100 ms vào barge-in. Giữ frame 4.800 byte. |
 | 5 | Có cần control message thêm không? (§4) | Cả hai | **Đề xuất (v1)** | **v1: chỉ `interrupt`.** Không `response.start` / `response.end`. Không `transcript` trên wire. Event `transfer` sẽ là đổi hợp đồng sau nếu cần chuyển lễ tân. |
 | 6 | **Transcript.** Hợp đồng hiện audio-only nên backend không persist text hội thoại. Bảng `Utterance` đã đúng nhưng sẽ trống. Nếu cần transcript để review, analytics, hay tách đặt bàn, nói ngay — thêm control message `transcript` rẻ lúc này và khó về sau. | Cả hai | **Đề xuất (v1)** | AI giữ transcript **trong RAM** chỉ cho LLM. **Không** thêm control message `transcript` ở v1. Xem lại nếu review/analytics cần text phía backend. |
 | 7 | **Đặt bàn.** Hệ thống đang hướng tới tool-calling để lấy chi tiết reservation. Ai sở hữu phần đó, và booking vào database của chúng tôi thế nào? Hợp đồng này chưa phủ. | Team AI | **Đề xuất** | **In-process, không đổi wire.** `toNumber` trên `session.init` khóa catalog. Tool `resolve_branch` / `confirm_branch` / `create_booking` chạy trong Thinking; `POST /bookings` (`source=phone_ai`) từ process AI. Socket vẫn chỉ PCM + `interrupt`. |

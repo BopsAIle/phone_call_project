@@ -71,7 +71,7 @@ async def test_digits_set_intent_and_fulfillment() -> None:
         assert pipeline.session.fulfillment == fulfillment
         assert pipeline.session.awaiting_choice is False
         prompt = pipeline.session.history[0]["content"]
-        assert "nếu khách chưa nói rõ muốn gì" not in prompt
+        assert "if the caller has not said what they want" not in prompt
         await _stop(ws, task)
 
 
@@ -116,7 +116,7 @@ async def test_invalid_digit_replays_menu_then_falls_back() -> None:
     assert pipeline.session.invalid_digit_count == 3
     assert pipeline.session.awaiting_choice is False
     prompt = pipeline.session.history[0]["content"]
-    assert "bạn muốn đặt bàn hay mang về" in prompt
+    assert "book a table or order takeaway" in prompt
     await _stop(ws, task)
 
 
@@ -254,8 +254,8 @@ async def test_menu_timeout_falls_back_to_verbal_prompt() -> None:
     await _init(ws, pipeline, INIT)
     assert await _wait_until(lambda: pipeline.session.awaiting_choice is False)
     prompt = pipeline.session.history[0]["content"]
-    assert "bạn muốn đặt bàn hay mang về" in prompt
-    assert "đang nghe menu phím" not in prompt
+    assert "book a table or order takeaway" in prompt
+    assert "hearing the keypad menu" not in prompt
     await _stop(ws, task)
 
 
