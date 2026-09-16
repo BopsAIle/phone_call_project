@@ -1,0 +1,59 @@
+# Hạ tầng local cho cả 3 phần: Postgres cho BE, Redis cache cho AI, ngrok cho Telnyx.
+# Tên container giữ nguyên như tài liệu cũ (AI/RUNBOOK.md) để lệnh trong đó vẫn đúng.
+#
+# ngrok nằm trong profile "ngrok": chỉ bật khi có NGROK_AUTHTOKEN (file .env ở root).
+# scripts/docker-up.sh tự thêm --profile ngrok khi đủ điều kiện.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai_receptionist_db
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: restaurant_ai
+      POSTGRES_USER: receptionist
+      POSTGRES_PASSWORD: receptionist
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U receptionist -d restaurant_ai"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: aibridge-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  ngrok:
+    image: ngrok/ngrok:3
+    container_name: aibridge-ngrok
+    profiles: ["ngrok"]
+    restart: unless-stopped
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+      NGROK_CONFIG: /etc/ngrok.yml
+    volumes:
+      - ./scripts/ngrok.yml:/etc/ngrok.yml:ro
+    # Tunnel tới AI Bridge chạy trên máy host (AI/.env: AI_BRIDGE_HOST=0.0.0.0)
+    command:
+      - http
+      - host.docker.internal:${AI_BRIDGE_PORT:-8080}
+      - --url=https://${NGROK_DOMAIN:-}
+      - --log=stdout
+    ports:
+      - "4040:4040"   # ngrok inspector: http://localhost:4040
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  postgres_data:

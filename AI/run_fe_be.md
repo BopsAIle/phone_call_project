@@ -1,5 +1,7 @@
 # Chạy backend NestJS + frontend React trên local
 
+> **Cập nhật:** từ nhánh `dev`, FE và BE đã được gộp vào cùng repo này ở `FE/` và `BE/` (AI Bridge nằm ở `AI/`). Các đường dẫn `restaurant-backend` / `restaurant-frontend` bên dưới tương ứng với `BE/` và `FE/`.
+
 Hai nhánh này **không nằm trong thư mục AI Bridge**. Chúng được checkout ra thư mục cạnh `phone_call_project`:
 
 | Dự án | Nhánh Git | Thư mục |
