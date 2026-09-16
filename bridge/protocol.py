@@ -53,6 +53,7 @@ class SessionInit:
     locale: str
     greeting: str
     to_number: str = ""
+    from_number: str = ""
 
     def to_dict(self) -> dict[str, str]:
         payload = {
@@ -65,6 +66,8 @@ class SessionInit:
         }
         if self.to_number:
             payload["toNumber"] = self.to_number
+        if self.from_number:
+            payload["fromNumber"] = self.from_number
         return payload
 
     def to_json(self) -> str:
@@ -82,6 +85,7 @@ class SessionInit:
             locale=locale,
             greeting=str(payload.get("greeting") or ""),
             to_number=str(payload.get("toNumber") or payload.get("to") or ""),
+            from_number=str(payload.get("fromNumber") or payload.get("from") or ""),
         )
 
 

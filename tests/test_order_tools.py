@@ -192,8 +192,23 @@ async def test_add_to_cart_rejects_unknown_id() -> None:
     payload = json.loads(
         await tools.execute("add_to_cart", json.dumps({"menu_item_id": "invented", "quantity": 1}))
     )
-    assert payload == {"ok": False, "error": "unknown_item"}
+    assert payload["ok"] is False
+    assert payload["error"] == "unknown_item"
+    assert "search_menu" in payload["next_step"]
     assert session.cart == []
+
+
+async def test_add_to_cart_recovers_invented_id_from_name() -> None:
+    """Models pass a slug of the dish name instead of calling search_menu first."""
+    session = _session_ready()
+    client = FakeOrderClient(menu=[PHO])
+    tools = OrderTools(session, client, ScriptedMenuMatcher())
+    slug = PHO.name.lower().replace(" ", "-")
+    payload = json.loads(
+        await tools.execute("add_to_cart", json.dumps({"menu_item_id": slug, "quantity": 2}))
+    )
+    assert payload["ok"] is True
+    assert [(line.menu_item_id, line.quantity) for line in session.cart] == [(PHO.id, 2)]
 
 
 async def test_add_to_cart_rejects_unavailable() -> None:
@@ -357,7 +372,7 @@ async def test_save_order_details_fills_slots_and_ask_next() -> None:
     )
     assert payload["ok"] is True
     assert payload["customer_name"] == "Nguyễn Văn A"
-    assert payload["ask_next"] == "hỏi khách muốn gọi món gì"
+    assert payload["ask_next"] == "ask what they would like to order"
     assert "items" in payload["missing"]
     assert session.order_customer_name == "Nguyễn Văn A"
 

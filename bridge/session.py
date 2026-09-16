@@ -7,26 +7,27 @@ import contextlib
 import json
 import logging
 import time
+from array import array
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
-from audio.resample import BRIDGE_RATE, OPENAI_RATE, StreamResampler, even_pcm16
+from audio.resample import OPENAI_RATE, even_pcm16
 from booking.client import normalize_hotline
 from booking.models import Branch, Restaurant
 from booking.tools import BOOKING_TOOL_NAMES, BOOKING_TOOLS, BookingTools
 from bridge.protocol import (
+    EVENT_AGENT_SPEECH,
     EVENT_CALL_END,
     EVENT_DTMF,
     EVENT_ORDER_CREATED,
+    EVENT_TRANSCRIPT,
     SERVICE_BY_DIGIT,
     VALID_DTMF_DIGITS,
 )
 from llm.stream import (
     INVALID_MENU_EN,
-    INVALID_MENU_VI,
     SERVICE_MENU_EN,
-    SERVICE_MENU_VI,
     build_system_prompt,
     fallback_phrase,
     split_spoken_sentences,
@@ -38,39 +39,37 @@ from turn.barge_in import OutboundGate, abort_and_interrupt, remaining_playback_
 logger = logging.getLogger(__name__)
 
 # ~2 s of 24 kHz PCM16 if STT is still connecting
-_MAX_PENDING_STT_BYTES = BRIDGE_RATE * 2 * 3  # 16k→24k ≈ 3/2, times 2 bytes, ~2 s
+_MAX_PENDING_STT_BYTES = OPENAI_RATE * 2 * 2  # 24 kHz × 2 bytes × ~2 s
+_PCM_LOG_SECONDS = 2.0
+_PCM_HEARD_PEAK = 400  # int16; well above cable noise, below normal speech
+
+
+def pcm16_peak(pcm: bytes) -> int:
+    """Max |sample| in little-endian PCM16. Used to see if the mic is silent."""
+    n = len(pcm) - (len(pcm) % 2)
+    if n < 2:
+        return 0
+    samples = array("h")
+    samples.frombytes(pcm[:n])
+    return max(abs(sample) for sample in samples)
+
+# How long barge-in waits for an in-flight create_booking / create_order to land.
+_CREATE_GRACE_SECONDS = 20.0
 
 _DTMF_USER_TEXT = {
-    "vi": {
-        "1": "Tôi ấn phím 1, đặt bàn.",
-        "2": "Tôi ấn phím 2, đặt đồ ăn đến lấy.",
-        "3": "Tôi ấn phím 3, đặt đồ ăn giao tận nơi.",
-    },
-    "en": {
-        "1": "I pressed 1, book a table.",
-        "2": "I pressed 2, order for pickup.",
-        "3": "I pressed 3, order for delivery.",
-    },
+    "1": "I pressed 1, book a table.",
+    "2": "I pressed 2, order for pickup.",
+    "3": "I pressed 3, order for delivery.",
 }
 
 
 def _menu_for_locale(locale: str) -> str:
-    lang = (locale or "").lower()[:2]
-    if lang == "vi":
-        return SERVICE_MENU_VI
-    if lang == "en":
-        return SERVICE_MENU_EN
-    return ""
+    return SERVICE_MENU_EN
 
 
 def greeting_has_service_menu(text: str, locale: str) -> bool:
     lowered = (text or "").casefold()
-    lang = (locale or "").lower()[:2]
-    if lang == "vi":
-        return "ấn phím 1" in lowered or "phím 1" in lowered
-    if lang == "en":
-        return "press 1" in lowered
-    return False
+    return "press 1" in lowered or "ấn phím 1" in lowered or "phím 1" in lowered
 
 
 def ensure_intent_greeting(greeting: str, locale: str) -> str:
@@ -109,6 +108,7 @@ class CallSession:
     locale: str = "en"
     greeting: str = ""
     to_number: str = ""
+    from_number: str = ""
     inited: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     spoken_this_turn: str = ""
@@ -190,6 +190,7 @@ class CallSession:
         self.locale = str(payload.get("locale") or "en")
         self.greeting = ensure_intent_greeting(str(payload.get("greeting") or ""), self.locale)
         self.to_number = normalize_hotline(str(payload.get("toNumber") or payload.get("to") or ""))
+        self.from_number = str(payload.get("fromNumber") or payload.get("from") or "").strip()
         self.inited = True
         self.awaiting_choice = greeting_has_service_menu(self.greeting, self.locale)
         self.history = []
@@ -216,6 +217,7 @@ class CallSession:
             order_status="" if self.order_created else order_status_prompt(self),
             service_choice=self.service_choice,
             awaiting_choice=self.awaiting_choice,
+            caller_number=self.from_number,
         )
         if self.history and self.history[0].get("role") == "system":
             self.history[0]["content"] = content
@@ -300,7 +302,7 @@ class TurnPlayer:
 
     async def _synth(self, text: str, queue: asyncio.Queue[Optional[bytes]]) -> None:
         try:
-            async for pcm in self.tts.stream_pcm16(text, self.locale, self.should_abort):
+            async for pcm in self.tts.stream_pcm16(text, "en", self.should_abort):
                 if self.should_abort():
                     break
                 await queue.put(pcm)
@@ -329,8 +331,28 @@ class TurnPlayer:
                     self._aborted = True
                     return
                 if first:
+                    # First audio chunk is on the wire, so the caller really hears this one.
+                    # Sentences killed by barge-in never get here, which is what we want:
+                    # the log is what was said, not what the model drafted.
                     self.session.note_spoken(text)
                     first = False
+                    logger.info("AI: %s", text)
+                    await self._notify_spoken(text)
+
+    async def _notify_spoken(self, text: str) -> None:
+        """Demo UI: telephony backends may ignore this event."""
+        if self.session.closed or not text:
+            return
+        try:
+            await self.outbound.send_json(
+                {
+                    "event": EVENT_AGENT_SPEECH,
+                    "callId": self.session.call_id,
+                    "text": text,
+                }
+            )
+        except Exception:
+            logger.exception("Failed to send agent speech %s", self.session.tag)
 
     async def finish(self) -> None:
         await self._sentence_qs.put(None)
@@ -407,7 +429,6 @@ class CallPipeline:
             else None
         )
         self.outbound = OutboundGate(websocket, self.session)
-        self._upsampler = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
         self._in_leftover = bytearray()
         self._pending_24k = bytearray()
         self._warned_pcm_before_init = False
@@ -421,6 +442,10 @@ class CallPipeline:
         self._created_this_turn = False
         self._create_in_flight = False
         self._shutting_down = False
+        self._pcm_bytes = 0
+        self._pcm_peak = 0
+        self._pcm_log_at = 0.0
+        self._pcm_heard = False
 
     async def run(self) -> None:
         # Khởi động dịch vụ speech to text
@@ -447,8 +472,9 @@ class CallPipeline:
                             "store context are missing. Socket stays open. %s",
                             self.session.tag,
                         )
-                    ##Chuẩn hóa thành dạng pcm16 sau đó upsamp sang 24kHz
-                    pcm24 = self._upsampler.process(even_pcm16(data, self._in_leftover))
+                    ##Client đã gửi PCM16 24kHz — chỉ cần bỏ byte lẻ rồi đẩy thẳng cho STT
+                    self._note_inbound_pcm(data)
+                    pcm24 = even_pcm16(data, self._in_leftover)
                     if pcm24:
                         await self._send_to_stt(pcm24)
                 elif text is not None:
@@ -485,6 +511,45 @@ class CallPipeline:
             drop = overflow + (overflow % 2)
             del self._pending_24k[:drop]
 
+    def _note_inbound_pcm(self, data: bytes) -> None:
+        if not data:
+            return
+        peak = pcm16_peak(data)
+        first = self._pcm_bytes == 0
+        self._pcm_bytes += len(data)
+        if peak > self._pcm_peak:
+            self._pcm_peak = peak
+        if first:
+            logger.info(
+                "Mic PCM first frame %s bytes=%s peak=%s stt_ready=%s",
+                self.session.tag,
+                len(data),
+                peak,
+                getattr(self.stt, "is_ready", False),
+            )
+        if not self._pcm_heard and peak >= _PCM_HEARD_PEAK:
+            self._pcm_heard = True
+            logger.info(
+                "Mic PCM heard speech-like energy %s peak=%s",
+                self.session.tag,
+                peak,
+            )
+        now = time.monotonic()
+        if self._pcm_log_at == 0.0:
+            self._pcm_log_at = now
+            return
+        if now - self._pcm_log_at < _PCM_LOG_SECONDS:
+            return
+        logger.info(
+            "Mic PCM %s bytes=%s peak=%s stt_ready=%s",
+            self.session.tag,
+            self._pcm_bytes,
+            self._pcm_peak,
+            getattr(self.stt, "is_ready", False),
+        )
+        self._pcm_log_at = now
+        self._pcm_peak = 0
+
     async def on_control(self, raw: str) -> None:
         try:
             payload = json.loads(raw)
@@ -506,6 +571,9 @@ class CallPipeline:
             logger.warning("Duplicate session.init ignored %s", self.session.tag)
             return
         self.session.apply_init(payload)
+        stt_call = getattr(self.stt, "_call_id", None)
+        if stt_call == "":
+            self.stt._call_id = self.session.call_id
         logger.info(
             "session.init %s store=%r locale=%s to=%s",
             self.session.tag,
@@ -626,6 +694,7 @@ class CallPipeline:
 
     async def on_speech_started(self) -> None:
         await self._cancel_hangup()
+        await self._notify_transcript("started")
         async with self._turn_lock:
             if self.session.closed or self.session.state in (CallState.CLOSED, CallState.BARGE_IN, CallState.LISTENING):
                 return
@@ -648,6 +717,11 @@ class CallPipeline:
             if self.session.closed:
                 return
             spoken = (text or "").strip()
+            if spoken:
+                logger.info("Người gọi: %s", spoken)
+            else:
+                logger.info("Người gọi: (trống — STT không ra chữ) %s", self.session.tag)
+            await self._notify_transcript("completed", spoken)
             if self.session.awaiting_choice and spoken:
                 self.session.awaiting_choice = False
                 await self._cancel_menu_timeout()
@@ -691,6 +765,22 @@ class CallPipeline:
         if isinstance(payload, dict) and payload.get("ok") and not payload.get("already_created"):
             self._created_this_turn = True
 
+    async def _notify_transcript(self, status: str, text: str = "") -> None:
+        """Demo UI: telephony backends may ignore this event."""
+        if self.session.closed:
+            return
+        event: dict[str, Any] = {
+            "event": EVENT_TRANSCRIPT,
+            "callId": self.session.call_id,
+            "status": status,
+        }
+        if status == "completed":
+            event["text"] = text
+        try:
+            await self.outbound.send_json(event)
+        except Exception:
+            logger.exception("Failed to send transcript %s", self.session.tag)
+
     async def _notify_order_created(self, raw_result: str) -> None:
         try:
             payload = json.loads(raw_result)
@@ -701,11 +791,7 @@ class CallPipeline:
         fulfillment = str(payload.get("fulfillment") or "").strip().lower()
         if fulfillment not in {"delivery", "pickup"}:
             return
-        locale = (self.session.locale or "vi").lower()[:2]
-        if locale == "vi":
-            message = "Đã đặt hàng thành công"
-        else:
-            message = "Order placed successfully"
+        message = "Order placed successfully"
         event: dict[str, Any] = {
             "event": EVENT_ORDER_CREATED,
             "callId": self.session.call_id,
@@ -737,7 +823,7 @@ class CallPipeline:
     async def on_transcript_failed(self) -> None:
         await self.on_transcript_completed("")
 
-    async def _run_reply(self, user_text: str) -> None:
+    async def _run_reply(self, user_text: str, *, from_dtmf: bool = False) -> None:
         self.session.begin_generation()
         self._created_this_turn = False
         self.session.state = CallState.THINKING
@@ -762,6 +848,23 @@ class CallPipeline:
                 await player.finish()
                 return
             self.session.history.append({"role": "user", "content": text})
+            if (
+                self._booking is not None
+                and not from_dtmf
+                and not self.session.selected_branch_id
+                and len(self.session.branches) > 1
+            ):
+                try:
+                    raw = await self._booking.resolve_branch(text)
+                    if isinstance(raw, dict) and raw.get("locked"):
+                        self.session.refresh_system_prompt()
+                        logger.info(
+                            "Locked branch from utterance %s branch=%s",
+                            self.session.tag,
+                            self.session.selected_branch_name or self.session.selected_branch_id,
+                        )
+                except Exception:
+                    logger.exception("Pre-lock branch from utterance failed %s", self.session.tag)
             kwargs: dict[str, Any] = {}
             tools: list[dict[str, Any]] = []
             if self._booking is not None:
@@ -815,11 +918,24 @@ class CallPipeline:
             if player is not None:
                 await player.abort()
             if work is not None and not work.done() and work is not asyncio.current_task():
-                work.cancel()
-                try:
-                    await work
-                except (asyncio.CancelledError, Exception):
-                    pass
+                if self._create_in_flight:
+                    # The POST that creates the booking / order is already on the wire.
+                    # Cancelling here loses the order even though the caller confirmed it,
+                    # so stop the audio but let the tool finish; the stale generation makes
+                    # the turn return right after.
+                    logger.info("Barge-in while creating; waiting for the tool %s", self.session.tag)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(work), _CREATE_GRACE_SECONDS)
+                    except asyncio.TimeoutError:
+                        logger.warning("Create did not finish in %ss; cancelling %s", _CREATE_GRACE_SECONDS, self.session.tag)
+                    except Exception:
+                        pass
+                if not work.done():
+                    work.cancel()
+                    try:
+                        await work
+                    except (asyncio.CancelledError, Exception):
+                        pass
             if self._player is player:
                 self._player = None
             if self._work_task is work:
@@ -828,9 +944,7 @@ class CallPipeline:
         await abort_and_interrupt(session=self.session, outbound=self.outbound, abort_work=abort_work)
 
     def _dtmf_user_text(self, digit: str) -> str:
-        lang = (self.session.locale or "en").lower()[:2]
-        table = _DTMF_USER_TEXT.get(lang) or _DTMF_USER_TEXT["en"]
-        return table.get(digit, "")
+        return _DTMF_USER_TEXT.get(digit, "")
 
     def _schedule_menu_timeout(self) -> None:
         task = self._menu_timeout_task
@@ -916,11 +1030,10 @@ class CallPipeline:
             self.session.apply_service_choice(digit)
             hint = self._dtmf_user_text(digit)
             if hint:
-                self._spawn(self._run_reply(hint))
+                self._spawn(self._run_reply(hint, from_dtmf=True))
 
     async def _speak_invalid_menu(self) -> None:
-        lang = (self.session.locale or "en").lower()[:2]
-        text = INVALID_MENU_VI if lang == "vi" else INVALID_MENU_EN
+        text = INVALID_MENU_EN
         self.session.begin_generation()
         self.session.state = CallState.SPEAKING
         player = TurnPlayer(self.session, self.outbound, self.tts, self.session.locale)

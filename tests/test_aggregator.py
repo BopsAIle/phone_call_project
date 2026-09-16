@@ -27,7 +27,8 @@ def test_question_exclaim_ellipsis_newline() -> None:
 
 def test_fallback_locale() -> None:
     assert "again" in fallback_phrase("en").lower()
-    assert "wiederholen" in fallback_phrase("de").lower()
+    assert fallback_phrase("de") == fallback_phrase("en")
+    assert fallback_phrase("vi") == fallback_phrase("en")
     assert fallback_phrase("fr") == fallback_phrase("en")
 
 
@@ -39,9 +40,9 @@ def test_system_prompt_uses_store_and_timezone() -> None:
     )
     assert "Bella Vista" in prompt
     assert "Europe/Berlin" in prompt
-    assert "de" in prompt
-    assert "tối nay" in prompt
+    assert "Speak English only" in prompt
     assert "tomorrow" in prompt
+    assert "Never speak Vietnamese" in prompt
 
 
 def test_system_prompt_covers_booking_and_order_when_catalog_loaded() -> None:
@@ -63,15 +64,15 @@ def test_system_prompt_covers_booking_and_order_when_catalog_loaded() -> None:
     assert "list_menu" in prompt
     assert "2 Phở bò" in prompt
     assert "12 Nguyen Trai" in prompt
-    assert "tiền mặt khi nhận" in prompt
-    assert "Không đọc phí giao hàng" in prompt
+    assert "cash on delivery" in prompt
+    assert "Do not read delivery fees" in prompt
     assert "save_order_details" in prompt
-    assert "giờ nhận hàng" in prompt
-    assert "ngày lấy món" in prompt
-    assert "số điện thoại người nhận" in prompt
+    assert "drop-off time" in prompt
+    assert "pickup date" in prompt
+    assert "recipient phone" in prompt
 
 
-def test_system_prompt_asks_branch_before_menu_when_unlocked() -> None:
+def test_system_prompt_asks_which_branch_when_unlocked() -> None:
     from booking.models import Branch
 
     prompt = build_system_prompt(
@@ -83,12 +84,28 @@ def test_system_prompt_asks_branch_before_menu_when_unlocked() -> None:
             Branch(id="bd", name="Ba Đình", address="Ba Đình"),
         ],
         catalog_loaded=True,
+        service_choice="3",
     )
-    assert "Không gọi search_menu" in prompt
-    assert "hỏi trước chi nhánh" in prompt
-    assert "chỉ đọc tên" in prompt
-    assert "đọc tên và địa chỉ đang hoạt động" not in prompt
-    assert "quận 3" in prompt
+    assert "Do not call search_menu" in prompt
+    assert "In this same turn also ask which branch they want" in prompt
+    assert "Do not ask for a branch first" not in prompt
+    assert "names only" in prompt
+    assert "district 3" in prompt
+
+
+def test_system_prompt_skips_branch_question_for_a_sole_branch() -> None:
+    from booking.models import Branch
+
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        branches=[Branch(id="mk", name="Minh Khai", address="Minh Khai")],
+        catalog_loaded=True,
+        service_choice="3",
+    )
+    assert "Do not ask for a branch first" in prompt
+    assert "In this same turn also ask which branch they want" not in prompt
 
 
 def test_system_prompt_keeps_address_for_followup_but_does_not_read_it() -> None:
@@ -104,16 +121,15 @@ def test_system_prompt_keeps_address_for_followup_but_does_not_read_it() -> None
         ],
         catalog_loaded=True,
     )
-    assert "chỉ đọc tên" in prompt
-    assert "CẤM đọc" in prompt
+    assert "names only" in prompt
+    assert "NEVER read" in prompt
     assert "12 Nguyễn Trãi" in prompt
     assert "56 Liễu Giai" in prompt
-    assert "chỉ tên và địa chỉ" not in prompt
     assert "HCM" in prompt
-    assert "Hồ Chí Minh" in prompt
-    names_block, _, rest = prompt.partition("Tên chi nhánh được phép đọc")
+    assert "Ho Chi Minh" in prompt
+    names_block, _, rest = prompt.partition("Branch names you may read aloud")
     assert "12 Nguyễn Trãi" not in names_block
-    speakable, _, private = rest.partition("Địa chỉ nội bộ")
+    speakable, _, private = rest.partition("Internal addresses")
     assert "Minh Khai" in speakable
     assert "12 Nguyễn Trãi" not in speakable
     assert "12 Nguyễn Trãi" in private
@@ -125,9 +141,8 @@ def test_system_prompt_asks_booking_or_takeaway_when_intent_unknown() -> None:
         timezone="UTC",
         locale="vi",
     )
-    assert "bạn muốn đặt bàn hay mang về" in prompt
-    assert "Không mở đầu bằng câu hỏi lựa chọn" not in prompt
-    assert "menu phím" not in prompt
+    assert "book a table or order takeaway" in prompt
+    assert "keypad menu" not in prompt
 
 
 def test_system_prompt_awaiting_dtmf_does_not_ask_verbally() -> None:
@@ -137,8 +152,8 @@ def test_system_prompt_awaiting_dtmf_does_not_ask_verbally() -> None:
         locale="vi",
         awaiting_choice=True,
     )
-    assert "đang nghe menu phím" in prompt
-    assert "nếu khách chưa nói rõ muốn gì" not in prompt
+    assert "hearing the keypad menu" in prompt
+    assert "if the caller has not said what they want" not in prompt
 
 
 def test_system_prompt_after_dtmf_booking_skips_service_question() -> None:
@@ -150,10 +165,12 @@ def test_system_prompt_after_dtmf_booking_skips_service_question() -> None:
         intent="booking",
         service_choice="1",
     )
-    assert "phím 1" in prompt
-    assert "Không hỏi lại loại dịch vụ" in prompt
-    assert "nếu khách chưa nói rõ muốn gì" not in prompt
-    assert "bạn muốn đặt bàn hay mang về" not in prompt
+    assert "key 1" in prompt
+    assert "Do not ask again which service" in prompt
+    assert "if the caller has not said what they want" not in prompt
+    assert "book a table or order takeaway" not in prompt
+    assert "Please say your name, address, phone number, and what you want for the table booking." in prompt
+    assert "Do not ask for a branch first" in prompt
 
 
 def test_system_prompt_dtmf_pickup_does_not_reask_fulfillment() -> None:
@@ -166,9 +183,11 @@ def test_system_prompt_dtmf_pickup_does_not_reask_fulfillment() -> None:
         service_choice="2",
         fulfillment="pickup",
     )
-    assert "phím 2" in prompt
-    assert "Không hỏi lại giao hàng hay mang về" in prompt
-    assert "Hình thức: đến lấy tại chi nhánh" in prompt
+    assert "key 2" in prompt
+    assert "Do not ask again whether this is delivery or pickup" in prompt
+    assert "Fulfillment: pickup at the selected branch" in prompt
+    assert "Please say your name, address, phone number, and what food you would like." in prompt
+    assert "Do not ask for a branch first" in prompt
 
 
 def test_system_prompt_does_not_reask_intent_when_booking() -> None:
@@ -179,8 +198,23 @@ def test_system_prompt_does_not_reask_intent_when_booking() -> None:
         intent="booking",
         catalog_loaded=True,
     )
-    assert "Người gọi hiện đang đặt bàn." in prompt
-    assert "nếu khách chưa nói rõ muốn gì" not in prompt
+    assert "The caller is currently booking a table." in prompt
+    assert "if the caller has not said what they want" not in prompt
+    assert "table-booking request" in prompt
+
+
+def test_system_prompt_skips_intake_after_booking_created() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="vi",
+        catalog_loaded=True,
+        intent="booking",
+        service_choice="1",
+        booking_created=True,
+    )
+    assert "key 1" in prompt
+    assert "Please say your name" not in prompt
 
 
 def test_system_prompt_lists_missing_order_slots() -> None:
@@ -191,7 +225,7 @@ def test_system_prompt_lists_missing_order_slots() -> None:
         catalog_loaded=True,
         fulfillment="delivery",
         delivery_address="12 Nguyen Trai",
-        order_status="Thông tin đơn còn thiếu: tên người đặt, số điện thoại người đặt. Hỏi tiếp: hỏi tên người đặt.",
+        order_status="Order details still missing: orderer name, orderer phone number. Ask next: ask for orderer name.",
     )
-    assert "còn thiếu: tên người đặt" in prompt
-    assert "Hỏi tiếp: hỏi tên người đặt" in prompt
+    assert "still missing: orderer name" in prompt
+    assert "Ask next: ask for orderer name" in prompt

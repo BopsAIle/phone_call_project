@@ -130,9 +130,9 @@ Giá phải trả là độ trễ cộng dồn (§2.3) và phải tự làm barg
  frontend/ (browser)    │  LUỒNG CUỘC GỌI (mỗi kết nối một instance)     │
  hoặc backend điện thoại│  ┌──────────────────────────────────────────┐  │
         │               │  │ /v1/bridge → CallPipeline                │  │
-        │  WS PCM16 16k │  │   PCM 16k ──upsample──→ 24k → STT + VAD  │  │
+        │  WS PCM16 24k │  │   PCM 24k ──→ STT + VAD (không resample)  │  │
         └──────────────────→│   transcript cuối → LLM (11 tools)       │  │
-        ←──────────────────│   câu → TTS 24k ──downsample──→ PCM 16k  │  │
+        ←──────────────────│   câu → TTS 24k ──→ PCM 24k (không resamp)│  │
            PCM + JSON    │  │   CallSession = snapshot + history       │  │
                          │  └──────────┬───────────────────────────────┘  │
                          │             │ đọc MỘT LẦN lúc session.init     │
@@ -217,9 +217,9 @@ Token rỗng hoặc sai → close code `1008`.
 | Hướng       | Loại frame | Nội dung                                                  |
 | ----------- | ---------- | --------------------------------------------------------- |
 | Client → AI | Text       | JSON `session.init` (một lần, ngay sau khi mở)            |
-| Client → AI | Binary     | PCM16 LE mono 16 kHz, ~100 ms = 3200 byte mỗi frame       |
+| Client → AI | Binary     | PCM16 LE mono 24 kHz, ~100 ms = 4800 byte mỗi frame       |
 | Client → AI | Text       | `{"event":"dtmf","digit":"1"}` **mới ở v2** — khách ấn phím chọn dịch vụ |
-| AI → Client | Binary     | PCM16 LE mono 16 kHz, audio agent                         |
+| AI → Client | Binary     | PCM16 LE mono 24 kHz, audio agent                         |
 | AI → Client | Text       | `{"event":"interrupt"}` khi barge-in                      |
 | AI → Client | Text       | `{"event":"order.created", …}` khi tạo đơn món thành công |
 | AI → Client | Text       | `{"event":"call.end", …}` **mới ở v2**, tùy chọn          |
@@ -271,9 +271,10 @@ Phần **duy nhất** phải thêm vào frontend ở v2 là keypad ba nút gửi
 Phần này mô tả code đang chạy. v2 không đổi gì ở đây, nhưng phải hiểu để không phá khi thêm cache và
 thêm cơ chế cúp máy.
 
-### 4.1 Vào: 16 kHz → 24 kHz
+### 4.1 Vào: 24 kHz thẳng vào STT
 
-OpenAI Realtime nhận PCM 24 kHz; client gửi 16 kHz. Hai cái bẫy:
+OpenAI Realtime nhận PCM 24 kHz và **wire giờ đã là 24 kHz**, nên client gửi thẳng, bridge không upsample
+nữa (bỏ được nút thắt 16 kHz cũ). Chỉ còn một cái bẫy phải xử lý:
 
 **Bẫy 1 — cắt giữa một sample.** PCM16 là 2 byte mỗi sample. Frame đến có thể lẻ byte (nhất là qua
 proxy). Cắt sai một byte thì toàn bộ phần sau bị dịch, nghe thành tiếng rít.
@@ -292,9 +293,9 @@ def even_pcm16(data: bytes, leftover: bytearray) -> bytes:
 
 Byte lẻ được **giữ lại** để ghép với frame sau, không bị bỏ.
 
-**Bẫy 2 — resample không trạng thái.** Resample từng chunk độc lập tạo tiếng "click" ở mỗi biên chunk,
-vì filter không biết đuôi chunk trước. `StreamResampler` bọc `soxr.ResampleStream` (quality `HQ`) để giữ
-trạng thái filter xuyên chunk.
+> Ghi chú: `StreamResampler` (bọc `soxr.ResampleStream`, quality `HQ`, giữ trạng thái filter xuyên chunk)
+> vẫn còn trong `audio/resample.py` như một util chung, nhưng **không còn nằm trên đường audio** vì wire
+> đã 24 kHz hai chiều.
 
 ### 4.2 Buffer khi STT chưa kết nối xong
 
@@ -303,9 +304,9 @@ STT mở WebSocket tới OpenAI mất vài trăm ms. Trong lúc đó audio khác
 `_send_to_stt()` giải quyết: chưa ready thì tích vào `_pending_24k`, ready thì flush trước rồi append tiếp
 — **giữ đúng thứ tự**. Trần buffer:
 
-```24:25:bridge/session.py
+```bridge/session.py
 # ~2 s of 24 kHz PCM16 if STT is still connecting
-_MAX_PENDING_STT_BYTES = BRIDGE_RATE * 2 * 3  # 16k→24k ≈ 3/2, times 2 bytes, ~2 s
+_MAX_PENDING_STT_BYTES = OPENAI_RATE * 2 * 2  # 24 kHz × 2 bytes × ~2 s
 ```
 
 96 000 byte ≈ 2 giây audio 24 kHz. Quá trần thì **bỏ phần cũ nhất** (và bỏ số byte chẵn, lại là bẫy 1).
@@ -331,8 +332,8 @@ VAD = {
 > nhưng dễ ngắt lời người nói chậm; nếu khách hàng phàn nàn "AI cắt lời", nâng lên 600–800 ms là chỗ tinh chỉnh đầu tiên.
 
 Session gửi lên OpenAI (`_session_payload`): `type: "transcription"`, format `audio/pcm` rate `24000`,
-`transcription.model` từ `OPENAI_STT_MODEL`, `language` = 2 ký tự đầu của locale. Model này **không nói** —
-chỉ phiên âm.
+`transcription.model` từ `OPENAI_STT_MODEL`, `language` **ghim cứng `"en"`** (không theo locale). Model này
+**không nói** — chỉ phiên âm.
 
 Có fallback: nếu model từ chối `turn_detection`, `_maybe_fallback_session()` chuyển sang session
 `type: "realtime"` với `create_response: false` và `interrupt_response: false`, tức là vẫn có VAD nhưng
@@ -355,13 +356,13 @@ nghe như robot.
 Vì sao cắt câu mà không chờ hết câu trả lời: để TTS bắt đầu synth câu 1 trong lúc LLM còn đang sinh câu 2.
 Đây là chỗ tiết kiệm được nhiều nhất trong ngân sách độ trễ.
 
-### 4.5 Ra: TTS 24 kHz → 16 kHz, phát theo thứ tự
+### 4.5 Ra: TTS 24 kHz thẳng ra wire, phát theo thứ tự
 
 `TurnPlayer` synth **song song**, gửi **tuần tự**:
 
 - Mỗi câu được `asyncio.create_task` riêng để synth (song song, nhanh).
 - Nhưng `_sender_loop` đọc từ queue theo đúng thứ tự câu, nên audio ra không bị đảo.
-- `TTS_CHUNK_BYTES` mặc định 1024 byte ≈ 32 ms audio 16 kHz. Chunk nhỏ thì phản hồi nhanh, chunk lớn thì ít overhead.
+- `TTS_CHUNK_BYTES` mặc định 1024 byte ≈ 21 ms audio 24 kHz. Chunk nhỏ thì phản hồi nhanh, chunk lớn thì ít overhead.
 - Mọi lần gửi đi qua `OutboundGate.send_audio(generation_id, pcm)`. Nếu `generation_id` đã đổi (barge-in), hàm trả `False` và audio bị bỏ — không có frame nào của lượt cũ lọt ra.
 
 ---
@@ -1252,7 +1253,7 @@ class OutboundGate:
 Thời gian còn phải chờ:
 
 ```python
-BYTES_PER_SECOND = 32_000     # 16 kHz × 1 channel × 2 byte
+BYTES_PER_SECOND = 48_000     # 24 kHz × 1 channel × 2 byte
 LEAD_SECONDS = 0.06           # khớp LEAD_SECONDS của PcmPlayer
 
 def remaining_playback_seconds(gate, grace_ms: int) -> float:
@@ -1671,7 +1672,7 @@ Test mới cần có:
 
 `**test_call_end.py**`
 
-- Grace tính đúng: gửi N byte → chờ ≈ N/32000 giây (+ lead + margin).
+- Grace tính đúng: gửi N byte → chờ ≈ N/48000 giây (+ lead + margin).
 - `speech_started` trong grace → hủy cúp máy, quay lại `LISTENING`.
 - `create_booking` lỗi → **không** cúp máy.
 - Socket đóng với code `1000` và `shutdown()` được gọi.

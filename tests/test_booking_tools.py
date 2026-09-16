@@ -169,7 +169,7 @@ async def test_resolve_branch_locks_when_llm_picks_quan_3_from_list() -> None:
             json.dumps({"spoken_name": "tôi muốn chọn chi nhánh quận 3"}),
         )
     )
-    assert matcher.calls == ["tôi muốn chọn chi nhánh quận 3"]
+    assert matcher.calls == []
     assert payload["status"] == "match"
     assert payload["locked"] is True
     assert payload["branch_id"] == "q3"

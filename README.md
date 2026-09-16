@@ -6,10 +6,10 @@ v1 sở hữu **audio vào -> audio ra**. Đặt bàn và đặt món (ship/mang
 
 ```
 Nguoi goi PSTN  <->  Twilio (8 kHz mu-law)  <->  Backend dien thoai  <->  AI Bridge
-                                                                        PCM16 16 kHz WebSocket
+                                                                        PCM16 24 kHz WebSocket
 ```
 
-Sơ đồ: người gọi PSTN nối Twilio, Twilio nối backend điện thoại, backend nối AI Bridge (repo này) bằng PCM16 16 kHz trên WebSocket.
+Sơ đồ: người gọi PSTN nối Twilio, Twilio nối backend điện thoại, backend nối AI Bridge (repo này) bằng PCM16 24 kHz trên WebSocket.
 
 ---
 
@@ -18,9 +18,9 @@ Sơ đồ: người gọi PSTN nối Twilio, Twilio nối backend điện thoạ
 Pipeline **cascaded** (nối tầng): Realtime API chỉ dùng cho STT + VAD. LLM và TTS là HTTP riêng - không dùng speech-to-speech.
 
 ```
-PCM 16 kHz (nguoi goi)
+PCM 24 kHz (nguoi goi)
         |
-        v  upsample 16 kHz -> 24 kHz
+        v  (khong resample: wire da 24 kHz)
    OpenAI Realtime STT  (server_vad, 800 ms im lang)
         |  transcript cuoi
         v
@@ -28,9 +28,9 @@ PCM 16 kHz (nguoi goi)
         |  flush tung cau (. ? ! ... xuong dong, khong o dau phay)
         v
    OpenAI TTS           (pcm 24 kHz)
-        |  downsample 24 kHz -> 16 kHz
+        |  (khong downsample: gui thang ra wire)
         v
-PCM 16 kHz (agent)  ->  backend
+PCM 24 kHz (agent)  ->  backend
 ```
 
 ### Vòng đời một cuộc gọi
@@ -47,13 +47,17 @@ Wire trên socket chỉ có hai loại frame:
 | Hướng | Frame | Nội dung |
 | --- | --- | --- |
 | Backend -> AI | Text | JSON `session.init` |
-| Backend -> AI | Binary | Audio người gọi, PCM16 LE mono 16 kHz, ~100 ms / 3200 byte |
+| Backend -> AI | Binary | Audio người gọi, PCM16 LE mono 24 kHz, ~100 ms / 4800 byte |
 | AI -> Backend | Binary | Audio agent, cùng định dạng |
 | AI -> Backend | Text | `{"event":"interrupt"}` khi barge-in |
 
 Auth: Bearer token lúc handshake. Endpoint: `ws://<host>:8080/v1/bridge` (local) / `wss://<host>/v1/bridge` (deploy).
 
 Chi tiết state machine, resample, và thứ tự barge-in: [documents/ai-pipeline.md](documents/ai-pipeline.md).
+
+**Gọi thẳng qua Telnyx** (không cần backend điện thoại riêng): bật `TELNYX_ENABLED=true`.
+Kiến trúc ở [documents/telnyx-integration.md](documents/telnyx-integration.md), các bước
+thiết lập trên portal ở [documents/telnyx-setup.md](documents/telnyx-setup.md).
 
 ---
 
@@ -72,7 +76,7 @@ phone_call_project/
 |   `-- session.py         # State machine cuoc goi, greeting, LLM->TTS, barge-in
 |
 |-- audio/
-|   `-- resample.py        # 16 kHz <-> 24 kHz, frame tron sample PCM16
+|   `-- resample.py        # Util resample PCM16 (vd narrowband <-> 24 kHz), frame tron sample
 |
 |-- stt/
 |   `-- realtime.py        # OpenAI Realtime transcription + server_vad
@@ -81,7 +85,7 @@ phone_call_project/
 |   `-- stream.py          # Chat stream + sentence aggregator + system prompt
 |
 |-- tts/
-|   `-- openai_tts.py      # TTS PCM 24 kHz -> downsample 16 kHz
+|   `-- openai_tts.py      # TTS PCM 24 kHz -> thang ra wire (khong downsample)
 |
 |-- turn/
 |   `-- barge_in.py        # Abort viec stale; interrupt sau audio da gui cuoi
@@ -105,8 +109,9 @@ phone_call_project/
 | `audio/resample.py` | Đổi sample rate, không cắt sample 16-bit xuyên frame |
 | `stt/realtime.py` | Transcription + sự kiện VAD (`speech_started` -> barge-in) |
 | `llm/stream.py` | Stream chat, cắt câu sang TTS |
-| `tts/openai_tts.py` | Synth PCM, downsample, yield chunk |
+| `tts/openai_tts.py` | Synth PCM 24 kHz, yield chunk (khớp wire, không downsample) |
 | `turn/barge_in.py` | Đảm bảo thứ tự hợp đồng mục 6.3: `interrupt` sau audio cuối |
+| `telephony/telnyx/` | Adapter Telnyx: webhook Call Control + media stream → CallPipeline |
 | `booking/` | Tool đặt bàn + HTTP booking |
 | `order/` | Tool giỏ hàng / đơn ship-mang về + HTTP menu/orders |
 
@@ -167,7 +172,7 @@ AI_BRIDGE_URL=ws://127.0.0.1:8080/v1/bridge
 AI_BRIDGE_TOKEN=<trùng AI_BRIDGE_TOKEN của repo này>
 ```
 
-Mỗi cuộc gọi mở một WebSocket, gửi `session.init` (kèm `locale: "vi"`), rồi PCM 16 kHz hai chiều.
+Mỗi cuộc gọi mở một WebSocket, gửi `session.init` (kèm `locale: "vi"`), rồi PCM 24 kHz hai chiều.
 
 ### 4. Test
 
@@ -181,7 +186,7 @@ pytest
 
 ## Phạm vi v1
 
-**Có:** STT + VAD, câu chào nguyên văn, LLM + history trong RAM, TTS, resample, barge-in `interrupt`.
+**Có:** STT + VAD, câu chào nguyên văn, LLM + history trong RAM, TTS, barge-in `interrupt`.
 
 **Không có:** Twilio / mu-law / frame 20 ms (backend sở hữu), persist transcript về backend, RAG, chuyển lễ tân. Đặt bàn và đặt đơn hàng nhà hàng qua HTTP in-process, không qua WebSocket.
 
@@ -191,7 +196,7 @@ Socket đứt = session mới. `callId` chỉ để khớp log.
 
 ## Demo thu âm (frontend)
 
-Folder [`frontend/`](frontend/) tách khỏi Python: trình duyệt thu micro, gửi PCM 16 kHz tới `/v1/bridge`, phát audio agent.
+Folder [`frontend/`](frontend/) tách khỏi Python: trình duyệt thu micro, gửi PCM 24 kHz tới `/v1/bridge`, phát audio agent.
 
 ```bash
 cd frontend

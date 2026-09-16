@@ -24,7 +24,7 @@ Backend điện thoại gọi tới dịch vụ này. Một WebSocket cho mỗi 
 flowchart LR
     Caller["Người gọi PSTN"] <--> Twilio
     Twilio <-->|"8 kHz mu-law 20 ms"| BE["Backend điện thoại"]
-    BE <-->|"16 kHz PCM16 WebSocket"| AI["Dịch vụ AI spec này"]
+    BE <-->|"24 kHz PCM16 WebSocket"| AI["Dịch vụ AI spec này"]
     AI <-->|"STT VAD"| STT["OpenAI Realtime transcription"]
     AI <-->|"chat stream"| LLM["OpenAI Chat Completions"]
     AI <-->|"TTS PCM"| TTS["OpenAI Speech"]
@@ -38,7 +38,7 @@ Dịch vụ này sở hữu:
 - Câu chào, đọc nguyên văn từ `session.init`
 - LLM + lịch sử hội thoại trong RAM
 - TTS
-- Đổi định dạng giữa bridge (PCM16 16 kHz) và OpenAI (PCM16 24 kHz)
+- Wire bridge và OpenAI cùng là PCM16 24 kHz — không còn phải đổi sample rate
 - Gửi `interrupt` khi barge-in, đúng thứ tự hợp đồng §6.3
 
 Dịch vụ này **không** sở hữu:
@@ -65,7 +65,7 @@ trên socket này.
 | Hướng        | Frame WebSocket | Payload                                                        |
 | ------------ | --------------- | -------------------------------------------------------------- |
 | Backend → AI | Text            | JSON `session.init`                                            |
-| Backend → AI | Binary          | Audio người gọi, PCM16 LE mono 16 kHz, ~100 ms / 3.200 byte    |
+| Backend → AI | Binary          | Audio người gọi, PCM16 LE mono 24 kHz, ~100 ms / 4.800 byte    |
 | AI → Backend | Binary          | Audio agent, cùng định dạng, kích thước tùy ý miễn trọn sample |
 | AI → Backend | Text            | `{"event":"interrupt"}` khi barge-in                           |
 
@@ -95,27 +95,28 @@ Có hai sample rate. Chúng không được lẫn sang phía bên kia.
 
 | Chặng                            | Rate      | Encoding                                                                    |
 | -------------------------------- | --------- | --------------------------------------------------------------------------- |
-| Bridge (cả hai chiều)            | 16.000 Hz | PCM16 signed, little-endian, mono, không header                             |
+| Bridge (cả hai chiều)            | 24.000 Hz | PCM16 signed, little-endian, mono, không header                             |
 | Input STT OpenAI Realtime        | 24.000 Hz | PCM16 signed, little-endian, mono, base64 trong `input_audio_buffer.append` |
 | OpenAI TTS `response_format=pcm` | 24.000 Hz | PCM16 signed, little-endian, mono, không header                             |
 
 
 Audio người gọi:
 
-1. Nhận frame nhị phân 16 kHz.
-2. Upsample 16 kHz → 24 kHz bằng bộ lọc chống alias.
-3. Encode base64 rồi `input_audio_buffer.append` lên Realtime. Base64 đó
-  là wire của OpenAI, không phải bridge.
+1. Nhận frame nhị phân 24 kHz (wire đã khớp Realtime — không resample).
+2. Chỉ giữ trọn sample (bỏ byte lẻ), rồi encode base64 và
+  `input_audio_buffer.append` lên Realtime. Base64 đó là wire của OpenAI,
+  không phải bridge.
 
 Audio agent:
 
 1. Nhận PCM 24 kHz từ TTS (stream).
-2. Downsample 24 kHz → 16 kHz bằng bộ lọc chống alias.
-3. Gửi frame nhị phân về backend. Không bao giờ cắt một sample 16-bit
-  xuyên hai frame. Không pace, không pad; gửi ngay khi có.
+2. Gửi thẳng frame nhị phân 24 kHz về backend (không downsample). Không bao
+  giờ cắt một sample 16-bit xuyên hai frame. Không pace, không pad; gửi ngay
+  khi có.
 
-PSTN không có nội dung trên 4 kHz. Upsample lên 24 kHz cho OpenAI **không**
-thêm thông tin giọng nói; chỉ để thỏa yêu cầu input Realtime.
+PSTN không có nội dung trên 4 kHz. Việc backend nâng audio điện thoại lên
+24 kHz cho wire **không** thêm thông tin giọng nói; chỉ để thỏa yêu cầu input
+Realtime.
 
 ---
 
@@ -279,7 +280,7 @@ trong lúc câu một còn đang phát** (`TurnPlayer`). Câu đầu không over
 Pipeline mỗi câu:
 
 1. TTS → chunk PCM 24 kHz (yield sớm nhờ chunk nhỏ).
-2. Downsample xuống 16 kHz.
+2. Giữ trọn sample (khớp wire 24 kHz, không downsample).
 3. Gửi nhị phân về backend ngay.
 4. Trước mỗi lần send, kiểm `generation_id`. Lệch → dừng, không gửi thêm
   cho lượt này.
@@ -399,10 +400,10 @@ Không nằm trong cây telephony của repo này; đây là layout process AI.
 | ------------------- | --------------------------------------------------- |
 | `bridge/server.py`  | Accept WebSocket, auth Bearer, phân binary vs text  |
 | `bridge/session.py` | State, history, `generation_id`, `playing`          |
-| `audio/resample.py` | 16 kHz ↔ 24 kHz, frame trọn sample                  |
+| `audio/resample.py` | Util resample PCM16 (narrowband ↔ 24 kHz), frame trọn sample |
 | `stt/realtime.py`   | Realtime transcription + sự kiện VAD                |
 | `llm/stream.py`     | Chat stream + sentence aggregator                   |
-| `tts/openai_tts.py` | Stream PCM, downsample, gửi                         |
+| `tts/openai_tts.py` | Stream PCM 24 kHz, gửi thẳng (không downsample)     |
 | `turn/barge_in.py`  | Abort việc stale; `interrupt` sau audio đã gửi cuối |
 | `booking/`          | Tool đặt bàn + HTTP `POST /bookings`                |
 | `order/`            | Tool giỏ/đơn + HTTP `GET /menu/branch/{id}` và POST delivery/takeout |

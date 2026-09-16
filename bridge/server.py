@@ -189,6 +189,10 @@ def create_app(
             if created_cache and cache is not None:
                 with contextlib.suppress(Exception):
                     await cache.aclose()
+            telnyx = getattr(app.state, "telnyx_client", None)
+            if telnyx is not None:
+                with contextlib.suppress(Exception):
+                    await telnyx.aclose()
 
     app = FastAPI(title="AI Bridge", version="2.0.0", lifespan=lifespan)
     app.add_middleware(
@@ -198,6 +202,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.state.settings = settings
+    app.state.telnyx_client = None
     app.state.catalog_cache = None
     app.state.catalog_syncer = None
 
@@ -265,20 +270,15 @@ def create_app(
         }
 
 
-## Khởi tạo kết nối websocket, so sánh header Authorization với token trong config
-## Gọi Call Pipeline 
-    @app.websocket("/v1/bridge")
-    async def bridge(websocket: WebSocket) -> None:
-        token = settings.ai_bridge_token
-        if not _bearer_authorized(websocket, token):
-            logger.error("Rejecting bridge handshake: missing or invalid Bearer token")
-            await websocket.close(code=1008, reason="Unauthorized")
-            return
-        await websocket.accept()
-        stt = app.state.stt_factory()
-        pipeline = CallPipeline(
-            websocket,
-            stt=stt,
+    def build_pipeline(socket: Any) -> CallPipeline:
+        """Wire one call to the shared clients. `socket` is any bridge-shaped socket.
+
+        /v1/bridge passes the real WebSocket; the Telnyx adapter passes a
+        TelnyxCallSocket, which is why no carrier detail reaches CallPipeline.
+        """
+        return CallPipeline(
+            socket,
+            stt=app.state.stt_factory(),
             llm=app.state.llm,
             tts=app.state.tts,
             restaurant_client=app.state.restaurant_client,
@@ -292,15 +292,39 @@ def create_app(
             dtmf_debounce_ms=settings.dtmf_debounce_ms,
             dtmf_max_invalid=settings.dtmf_max_invalid,
         )
-        try:
-            await pipeline.run()
-        except WebSocketDisconnect:
-            logger.info("Backend closed the bridge socket")
-        except Exception:
-            logger.exception("Bridge pipeline crashed")
+
+    app.state.build_pipeline = build_pipeline
+
+## Khởi tạo kết nối websocket, so sánh header Authorization với token trong config
+## Gọi Call Pipeline 
+    if settings.bridge_enabled:
+
+        @app.websocket("/v1/bridge")
+        async def bridge(websocket: WebSocket) -> None:
+            token = settings.ai_bridge_token
+            if not _bearer_authorized(websocket, token):
+                logger.error("Rejecting bridge handshake: missing or invalid Bearer token")
+                await websocket.close(code=1008, reason="Unauthorized")
+                return
+            await websocket.accept()
+            pipeline = build_pipeline(websocket)
             try:
-                await websocket.close(code=1011, reason="Internal error")
+                await pipeline.run()
+            except WebSocketDisconnect:
+                logger.info("Backend closed the bridge socket")
             except Exception:
-                pass
+                logger.exception("Bridge pipeline crashed")
+                try:
+                    await websocket.close(code=1011, reason="Internal error")
+                except Exception:
+                    pass
+    else:
+        logger.warning("BRIDGE_ENABLED=false: /v1/bridge is not mounted")
+
+    if settings.telnyx_enabled:
+        from telephony.telnyx.routes import build_telnyx_router
+
+        app.include_router(build_telnyx_router(app, settings))
+        logger.info("Telnyx routes mounted: POST /telnyx/webhook, WS /telnyx/media")
 
     return app

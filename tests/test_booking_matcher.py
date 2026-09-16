@@ -93,12 +93,12 @@ async def test_openai_matcher_sends_list_and_spoken_name_to_llm() -> None:
         }
     )
     matcher = OpenAiBranchMatcher(client, "gpt-test")
-    result = await matcher.match("tôi muốn chọn chi nhánh quận 3", DISTRICT_BRANCHES)
+    result = await matcher.match("cái gần Võ Văn Tần giúp", DISTRICT_BRANCHES)
     assert result.status == "match"
     assert result.branch_id == "q3"
     assert len(client.calls) == 1
     user = client.calls[0]["messages"][1]["content"]
-    assert "tôi muốn chọn chi nhánh quận 3" in user
+    assert "cái gần Võ Văn Tần giúp" in user
     assert "Chi nhánh Quận 1" in user
     assert "Chi nhánh Quận 2" in user
     assert "Chi nhánh Quận 3" in user
@@ -145,6 +145,30 @@ async def test_named_hcm_branch_skips_llm() -> None:
     assert client.calls == []
 
 
+def test_unique_branch_name_kfc() -> None:
+    from booking.matcher import match_unique_branch_name
+
+    kfc = Branch(id="kfc", name="KFC", address="Hoàng Quốc Việt")
+    lot = Branch(id="lot", name="Lotteria Hoàng Quốc Việt", address="Hoàng Quốc Việt")
+    hut = Branch(id="hut", name="Pizza Hut Trần Đăng Ninh", address="Trần Đăng Ninh")
+    result = match_unique_branch_name("KFC", [kfc, lot, hut])
+    assert result is not None
+    assert result.status == "match"
+    assert result.branch_id == "kfc"
+    assert result.confidence == "high"
+
+
+async def test_unique_kfc_skips_llm() -> None:
+    client = _FakeChatClient({"status": "none"})
+    kfc = Branch(id="kfc", name="KFC", address="Hoàng Quốc Việt")
+    lot = Branch(id="lot", name="Lotteria Hoàng Quốc Việt", address="Hoàng Quốc Việt")
+    matcher = OpenAiBranchMatcher(client, "gpt-test")
+    result = await matcher.match("cho mình KFC", [kfc, lot])
+    assert result.status == "match"
+    assert result.branch_id == "kfc"
+    assert client.calls == []
+
+
 async def test_openai_matcher_expands_hcm_alias_for_llm_when_name_has_no_hcm() -> None:
     client = _FakeChatClient(
         {
@@ -166,4 +190,27 @@ async def test_openai_matcher_expands_hcm_alias_for_llm_when_name_has_no_hcm() -
     assert "Hồ Chí Minh" in user
     system = client.calls[0]["messages"][0]["content"]
     assert "HCM" in system
-    assert "Hồ Chí Minh" in system
+    assert "Ho Chi Minh" in system
+
+
+def test_food_word_inside_branch_name_is_weak_evidence() -> None:
+    """'I want a pizza' must not lock Pizza Hut; the LLM matcher decides instead."""
+    from booking.matcher import match_unique_branch_name
+
+    kfc = Branch(id="kfc", name="KFC", address="Hoàng Quốc Việt")
+    hut = Branch(id="hut", name="Pizza Hut Trần Đăng Ninh", address="Trần Đăng Ninh")
+    result = match_unique_branch_name("I want a pizza", [kfc, hut])
+    assert result is not None
+    assert result.confidence == "low"
+
+
+def test_branch_named_in_a_sentence_still_locks() -> None:
+    from booking.matcher import match_unique_branch_name
+
+    kfc = Branch(id="kfc", name="KFC", address="Hoàng Quốc Việt")
+    hut = Branch(id="hut", name="Pizza Hut Trần Đăng Ninh", address="Trần Đăng Ninh")
+    result = match_unique_branch_name("I want the KFC branch", [kfc, hut])
+    assert result is not None
+    assert result.status == "match"
+    assert result.branch_id == "kfc"
+    assert result.confidence == "high"

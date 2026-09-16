@@ -15,8 +15,13 @@ export class PcmPlayer {
     return this.analyser;
   }
 
+  get remainingSeconds(): number {
+    if (!this.context || this.context.state === "closed") return 0;
+    return Math.max(0, this.nextTime - this.context.currentTime);
+  }
+
   get isPlaying(): boolean {
-    return this.sources.length > 0 || this.queuedSeconds > 0.04;
+    return this.sources.length > 0 || this.remainingSeconds > 0.02;
   }
 
   async ensureStarted(): Promise<void> {

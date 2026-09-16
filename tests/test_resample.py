@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from audio.resample import BRIDGE_RATE, OPENAI_RATE, StreamResampler, even_pcm16
+from audio.resample import NARROWBAND_RATE, OPENAI_RATE, StreamResampler, even_pcm16
 
 
 def _sine(rate: int, seconds: float, freq: float = 440.0) -> bytes:
@@ -22,9 +22,9 @@ def test_even_pcm16_holds_odd_byte() -> None:
 
 
 def test_upsample_100ms_frame_is_whole_samples() -> None:
-    frame = _sine(BRIDGE_RATE, 0.1)
+    frame = _sine(NARROWBAND_RATE, 0.1)
     assert len(frame) == 3200
-    rs = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
+    rs = StreamResampler(NARROWBAND_RATE, OPENAI_RATE)
     out = rs.process(frame) + rs.flush()
     assert len(out) % 2 == 0
     samples = len(out) // 2
@@ -32,10 +32,10 @@ def test_upsample_100ms_frame_is_whole_samples() -> None:
 
 
 def test_roundtrip_preserves_low_frequency() -> None:
-    original = np.frombuffer(_sine(BRIDGE_RATE, 0.2, freq=300.0), dtype=np.int16).astype(np.float64)
-    up = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
-    down = StreamResampler(OPENAI_RATE, BRIDGE_RATE)
-    high = up.process(_sine(BRIDGE_RATE, 0.2, freq=300.0)) + up.flush()
+    original = np.frombuffer(_sine(NARROWBAND_RATE, 0.2, freq=300.0), dtype=np.int16).astype(np.float64)
+    up = StreamResampler(NARROWBAND_RATE, OPENAI_RATE)
+    down = StreamResampler(OPENAI_RATE, NARROWBAND_RATE)
+    high = up.process(_sine(NARROWBAND_RATE, 0.2, freq=300.0)) + up.flush()
     back = down.process(high) + down.flush()
     restored = np.frombuffer(back, dtype=np.int16).astype(np.float64)
     n = min(len(original), len(restored))
@@ -46,9 +46,9 @@ def test_roundtrip_preserves_low_frequency() -> None:
 
 
 def test_streaming_chunks_match_one_shot_length() -> None:
-    pcm = _sine(BRIDGE_RATE, 0.15)
-    one = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
-    streamed = StreamResampler(BRIDGE_RATE, OPENAI_RATE)
+    pcm = _sine(NARROWBAND_RATE, 0.15)
+    one = StreamResampler(NARROWBAND_RATE, OPENAI_RATE)
+    streamed = StreamResampler(NARROWBAND_RATE, OPENAI_RATE)
     all_at_once = one.process(pcm) + one.flush()
     parts = []
     for i in range(0, len(pcm), 640):

@@ -88,7 +88,7 @@ gọi thật (câu chào pháp lý, không bịa món, không POST đơn kép).
 | Câu chào disclosure              | TTS nguyên văn                                               | Vẫn TTS nguyên văn (HTTP), rồi mới để S2S nói các lượt sau — xem §7                |
 | History LLM                      | `CallSession.history` ta tự giữ                              | OpenAI giữ conversation; ta giữ **bản sao text** (transcript) để log / debug       |
 | Barge-in                         | Ta tự `response.cancel` logic + `interrupt` sau audio cuối   | Realtime có `interrupt_response`; ta **vẫn** gửi `{"event":"interrupt"}` đúng hợp đồng |
-| Wire `/v1/bridge`                | PCM 16 kHz + `session.init` + `interrupt`                    | **Y nguyên**                                                                       |
+| Wire `/v1/bridge`                | PCM 24 kHz + `session.init` + `interrupt`                    | **Y nguyên**                                                                       |
 
 
 Không đụng Redis / DTMF / hangup của v2. Nếu v2 đã có cache, S2S **đọc snapshot
@@ -161,23 +161,23 @@ trước marker (DATA) copy nguyên từ bản đã gửi lúc init, không đ�
 
 ```
  frontend / backend điện thoại
-        │  WS PCM16 16 kHz + session.init   (không đổi)
+        │  WS PCM16 24 kHz + session.init   (không đổi)
         ▼
  AI Bridge
         │
         │  session.init
-        │     1) TTS greeting nguyên văn → PCM 16k ra socket
+        │     1) TTS greeting nguyên văn → PCM 24k ra socket
         │     2) song song: snapshot nhà hàng + menu mọi chi nhánh
         │     3) mở Realtime voice-agent
         │     4) session.update (instructions hành vi)
         │     5) conversation.item.create (message DATA)
         │     6) conversation.item.create (assistant text = đúng câu greeting)
         │
- PCM 16k ──upsample──▶ 24k ── input_audio_buffer.append
+ PCM 24k ──────────────▶ input_audio_buffer.append  (không upsample)
         │
         │  VAD / semantic turn
         │     model nói ── response.output_audio.delta (PCM 24k)
-        │                    ──downsample──▶ PCM 16k ra socket
+        │                    ──────────────▶ PCM 24k ra socket (không downsample)
         │     model gọi tool ghi ── ta chạy ── function_call_output
         │
  Redis / HTTP catalog   (chỉ lúc init, không trên đường nóng)
@@ -387,7 +387,7 @@ thắng ở điểm này vì greeting chỉ là chuỗi đưa vào TTS.
 Trình tự:
 
 1. `ensure_intent_greeting()` như hiện tại (hoặc menu 3 phím nếu v2 đã có).
-2. HTTP TTS (`tts/openai_tts.py` hiện có) → PCM 16 kHz ra socket. `playing=true`.
+2. HTTP TTS (`tts/openai_tts.py` hiện có) → PCM 24 kHz ra socket. `playing=true`.
 3. Realtime đã connect; DATA item đã vào; `create_response` vẫn `false`.
 4. `conversation.item.create` một assistant **text** đúng nguyên văn greeting, để
    model biết mình "đã nói" và không chào lại.
@@ -473,14 +473,15 @@ có món". Thay bằng:
 
 | Chặng                    | Rate    | Encoding                    |
 | ------------------------ | ------- | --------------------------- |
-| Bridge hai chiều         | 16 kHz  | PCM16 LE mono               |
+| Bridge hai chiều         | 24 kHz  | PCM16 LE mono               |
 | Realtime S2S in / out    | 24 kHz  | PCM16, base64 trên event OpenAI |
 
 
-Tái sử dụng `audio/resample.py`. Không đưa mu-law / 8 kHz vào AI Bridge.
+Wire và Realtime đều 24 kHz nên **không cần resample** (chỉ giữ trọn sample
+16-bit). Không đưa mu-law / 8 kHz vào AI Bridge.
 
-Input: binary WS → upsample → `input_audio_buffer.append`.
-Output: `response.output_audio.delta` (base64) → decode → downsample →
+Input: binary WS → `input_audio_buffer.append`.
+Output: `response.output_audio.delta` (base64) → decode →
 `OutboundGate.send_audio`. Không pace, không cắt sample 16-bit xuyên frame.
 
 ### 9.2 Barge-in và hợp đồng `interrupt`
@@ -563,9 +564,9 @@ Endpoint vẫn `ws://…/v1/bridge`. Auth Bearer / `?token=` như cũ.
 | Hướng        | Frame  | Payload                                      |
 | ------------ | ------ | -------------------------------------------- |
 | Client → AI  | Text   | `session.init`                               |
-| Client → AI  | Binary | PCM16 16 kHz                                 |
+| Client → AI  | Binary | PCM16 24 kHz                                 |
 | Client → AI  | Text   | `dtmf` nếu v2 đã có — S2S nhận được thì inject user text "Khách ấn phím N" rồi `response.create` |
-| AI → Client  | Binary | PCM16 16 kHz                                 |
+| AI → Client  | Binary | PCM16 24 kHz                                 |
 | AI → Client  | Text   | `{"event":"interrupt"}`                      |
 | AI → Client  | Text   | `order.created` khi POST đơn 2xx             |
 

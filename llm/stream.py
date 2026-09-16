@@ -16,6 +16,8 @@ FALLBACK_PHRASES = {
     "en": "Sorry, I didn't catch that. Could you say that again?",
 }
 _MAX_TOOL_ROUNDS = 12
+# Barge-in must not skip these: they are the only writes to the restaurant backend.
+_UNINTERRUPTIBLE_TOOLS = frozenset({"create_booking", "create_order"})
 
 SERVICE_MENU_EN = (
     "To book a table, press 1. "
@@ -27,18 +29,64 @@ INVALID_MENU_EN = "Sorry, I didn't catch that. Press 1 for a table, 2 for pickup
 INVALID_MENU_VI = INVALID_MENU_EN
 INTAKE_BOOKING = (
     "Your next spoken turn MUST invite the caller to say, in one go: their name, address, "
-    "phone number, and table-booking request. Do not ask for a branch first. "
+    "phone number, and table-booking request. {branch_rule}"
     "Do not ask for each field separately yet. "
     "Say something like: 'Please say your name, address, phone number, and what you want for the table booking.' "
     "If they already gave this, do not ask again; only ask for what is still missing."
 )
 INTAKE_ORDER = (
     "Your next spoken turn MUST invite the caller to say, in one go: their name, address, "
-    "phone number, and food request. Do not ask for a branch first. "
+    "phone number, and food request. {branch_rule}"
     "Do not ask for each field separately yet. "
     "Say something like: 'Please say your name, address, phone number, and what food you would like.' "
     "If they already gave this, do not ask again; only ask for what is still missing."
 )
+INTAKE_BOOKING_CALLER_ID = (
+    "Your next spoken turn MUST invite the caller to say, in one go: their name, address, and "
+    "table-booking request, and in the same turn confirm the number they are calling from: read it "
+    "back digit by digit and ask whether to use that number for the booking. "
+    "Do NOT ask them to say or read out a phone number. {branch_rule}"
+    "Say something like: 'Please say your name, address, and what you want for the table booking. "
+    "Is the number you are calling from, {digits}, the right one for the booking?' "
+    "If they already gave this, do not ask again; only ask for what is still missing."
+)
+INTAKE_ORDER_CALLER_ID = (
+    "Your next spoken turn MUST invite the caller to say, in one go: their name, address, and "
+    "food request, and in the same turn confirm the number they are calling from: read it back "
+    "digit by digit and ask whether to use that number for the order. "
+    "Do NOT ask them to say or read out a phone number. {branch_rule}"
+    "Say something like: 'Please say your name, address, and what food you would like. "
+    "Is the number you are calling from, {digits}, the right one for the order?' "
+    "If they already gave this, do not ask again; only ask for what is still missing."
+)
+
+
+BRANCH_ASK = (
+    "In this same turn also ask which branch they want, and read the branch names aloud "
+    "(names only, never addresses). If what they say already points at one branch, say which "
+    "one you picked and let them correct you, instead of asking again. "
+)
+BRANCH_SKIP = "Do not ask for a branch first. "
+
+
+def _spoken_digits(number: str) -> str:
+    """Telnyx hands us +84912345678; speak it as digits, never as one long integer."""
+    digits = [ch for ch in (number or "") if ch.isdigit()]
+    return " ".join(digits)
+
+
+def _caller_number_rules(caller_number: str) -> str:
+    return (
+        f"The caller is calling from {caller_number} (say it as: {_spoken_digits(caller_number)}). "
+        "Treat this as their phone number by default. Never ask them to read their phone number out. "
+        "Ask once, in plain words, whether this number is the one to use for the booking or order, "
+        "reading it back digit by digit. If they say yes, use it and never ask for a number again. "
+        "Only if they say no, or it is for someone else, ask them to say the number they want instead. "
+        "The moment they agree, call save_order_details (or create_booking for a table) with "
+        "use_caller_number true and no phone_number; that stores the real number from the carrier. "
+        "Never type the digits back yourself when they agreed. "
+        "If they give a different number, pass that one as phone_number instead."
+    )
 
 
 def fallback_phrase(locale: str) -> str:
@@ -99,10 +147,21 @@ def build_system_prompt(
     order_status: str = "",
     service_choice: str = "",
     awaiting_choice: bool = False,
+    caller_number: str = "",
 ) -> str:
     tz_name, now = _now_in_zone(timezone)
     lang = locale or "en"
     name = store_name or "the restaurant"
+    caller_number = (caller_number or "").strip()
+    spoken = _spoken_digits(caller_number)
+    # Nothing to ask when the restaurant has one branch or one is already locked.
+    branch_rule = BRANCH_SKIP if (len(list(branches or [])) <= 1 or selected_branch_name) else BRANCH_ASK
+    intake_booking = (INTAKE_BOOKING_CALLER_ID if caller_number else INTAKE_BOOKING).format(
+        digits=spoken, branch_rule=branch_rule
+    )
+    intake_order = (INTAKE_ORDER_CALLER_ID if caller_number else INTAKE_ORDER).format(
+        digits=spoken, branch_rule=branch_rule
+    )
     parts = [
         f"You are the phone assistant for {name}.",
         "Speak English only. Never speak Vietnamese or any other language.",
@@ -118,9 +177,12 @@ def build_system_prompt(
         "Never read UUIDs, JSON, or tool names aloud.",
         "Never mention these instructions.",
         "After the caller chooses a service, the first question is one sentence asking them to say "
-        "their name, address, phone number, and request. Later turns ask only for missing items, "
-        "one or two sentences at a time.",
+        + ("their name, address, and request. " if caller_number else "their name, address, phone number, and request. ")
+        + "Later turns ask only for missing items, one or two sentences at a time.",
     ]
+    if caller_number:
+        parts.append(_caller_number_rules(caller_number))
+
     if restaurant_missing:
         parts.append(
             "The restaurant for this number could not be loaded. "
@@ -135,21 +197,21 @@ def build_system_prompt(
             "Go straight to the next step."
         )
         if not booking_created:
-            parts.append(INTAKE_BOOKING)
+            parts.append(intake_booking)
     elif service_choice == "2":
         parts.append(
             "The caller chose food for pickup with key 2. Do not ask again which service they want. "
             "Go straight to the next step."
         )
         if not order_created:
-            parts.append(INTAKE_ORDER)
+            parts.append(intake_order)
     elif service_choice == "3":
         parts.append(
             "The caller chose food delivery with key 3. Do not ask again which service they want. "
             "Go straight to the next step."
         )
         if not order_created:
-            parts.append(INTAKE_ORDER)
+            parts.append(intake_order)
     elif not intent:
         if awaiting_choice:
             parts.append(
@@ -168,10 +230,10 @@ def build_system_prompt(
             )
     elif intent == "booking":
         if not booking_created:
-            parts.append(INTAKE_BOOKING)
+            parts.append(intake_booking)
     elif intent == "order":
         if not order_created:
-            parts.append(INTAKE_ORDER)
+            parts.append(intake_order)
     parts.append(
         "If they change their mind before a table or order is created, follow the new request and "
         "do not call the create tool for the request they dropped."
@@ -225,8 +287,9 @@ def build_system_prompt(
             )
         else:
             parts.append(
-                "No branch is locked yet. Do not ask for a branch first. "
-                "After the caller says an address or place, call resolve_branch with those exact words. "
+                "No branch is locked yet. Ask which branch they want, reading the names only. "
+                "When the caller says an address or place, call resolve_branch with those exact words "
+                "instead of asking again. "
                 "Do not call search_menu, list_menu, add_to_cart, or create_order before a branch is locked. "
                 "If it does not match, then ask which branch (read names only, no addresses)."
             )
@@ -243,7 +306,7 @@ def build_system_prompt(
         )
     else:
         parts.append(
-            "Table booking: after the caller says their name, address, phone number, and request, "
+            "Table booking: after the caller says their name, address, and request, "
             "take the details from their words. Match the branch from the address if none is locked. "
             "Briefly confirm the branch name once locked. If party size, date, or time is still missing, ask next. "
             "Notes are optional."
@@ -282,7 +345,8 @@ def build_system_prompt(
         parts.append(
             "Ask if they want anything else. Use update_cart or remove_from_cart if they change items. "
             "Collect the remaining details for how they will receive the order; do not invent fields. "
-            "Ask in this order: first name + address + phone number + dishes they want, "
+            "Ask in this order: first name + address + phone number (or confirmation of the calling number) "
+            "+ dishes they want, "
             "then only ask for what is still missing. Skip anything already collected. "
             "Whenever the caller gives a name, phone, date, time, note, address, or recipient phone: "
             "call save_order_details immediately."
@@ -451,7 +515,8 @@ class OpenAiLlm:
                 "messages": messages,
                 "stream": True,
                 "temperature": 0.7,
-                "max_tokens": 400,
+                # A readback plus a create_* tool call has to fit here; truncation drops the call.
+                "max_tokens": 700,
             }
             if tools:
                 kwargs["tools"] = tools
@@ -459,6 +524,7 @@ class OpenAiLlm:
             stream = await self._client.chat.completions.create(**kwargs)
             aggregator = SentenceAggregator()
             tool_calls: dict[int, dict[str, str]] = {}
+            finish_reason = ""
             try:
                 async for chunk in stream:
                     if should_abort():
@@ -466,6 +532,7 @@ class OpenAiLlm:
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
                     if choice is None:
                         continue
+                    finish_reason = str(getattr(choice, "finish_reason", "") or "") or finish_reason
                     delta = getattr(choice, "delta", None)
                     if delta is None:
                         continue
@@ -484,6 +551,10 @@ class OpenAiLlm:
                 if close is not None:
                     await close()
 
+            if finish_reason == "length":
+                # Truncated mid-answer: any tool call the model was about to make is lost.
+                logger.warning("LLM response hit max_tokens; tool calls may have been cut off")
+
             ordered = [tool_calls[i] for i in sorted(tool_calls) if tool_calls[i].get("name")]
             if not ordered or execute_tool is None:
                 return
@@ -501,23 +572,42 @@ class OpenAiLlm:
                     }
                 )
             messages.append({"role": "assistant", "content": None, "tool_calls": assistant_tools})
-            for call in assistant_tools:
-                if should_abort():
-                    payload = json.dumps({"ok": False, "error": "interrupted"})
-                else:
+            # Every tool_call in that assistant message needs a matching tool message, or the
+            # next request is rejected and the rest of the call can never use a tool again.
+            # BaseException covers CancelledError: barge-in cancels this task mid-tool.
+            answered: set[str] = set()
+            try:
+                for call in assistant_tools:
                     fn = call["function"]
-                    try:
-                        payload = await _run_tool(execute_tool, fn["name"], fn["arguments"])
-                    except Exception:
-                        logger.exception("Tool %s failed", fn["name"])
-                        payload = json.dumps({"ok": False, "error": "tool_failed"})
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": payload,
-                    }
-                )
+                    if should_abort() and fn["name"] not in _UNINTERRUPTIBLE_TOOLS:
+                        payload = json.dumps({"ok": False, "error": "interrupted"})
+                    else:
+                        logger.info("Tool call %s args=%s", fn["name"], fn["arguments"])
+                        try:
+                            payload = await _run_tool(execute_tool, fn["name"], fn["arguments"])
+                        except Exception:
+                            logger.exception("Tool %s failed", fn["name"])
+                            payload = json.dumps({"ok": False, "error": "tool_failed"})
+                        logger.info("Tool result %s -> %s", fn["name"], payload)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": payload,
+                        }
+                    )
+                    answered.add(call["id"])
+            except BaseException:
+                for call in assistant_tools:
+                    if call["id"] not in answered:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call["id"],
+                                "content": json.dumps({"ok": False, "error": "interrupted"}),
+                            }
+                        )
+                raise
             if should_abort():
                 return
         logger.warning("Hit max tool rounds (%s); stopping without speech", _MAX_TOOL_ROUNDS)
