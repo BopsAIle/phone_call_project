@@ -1,0 +1,183 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  background-color: #f5f7fa;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: rgba(0, 0, 0, 0.85);
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+
+/* Table styles */
+.ant-table {
+  font-size: 14px;
+}
+
+.ant-table-thead > tr > th {
+  background-color: #fafafa;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.85);
+  border-bottom: 2px solid #f0f0f0;
+}
+
+.ant-table-tbody > tr:hover > td {
+  background: #f5f5f5;
+}
+
+/* Card styles */
+.ant-card {
+  border: none;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02),
+    0 2px 4px 0 rgba(0, 0, 0, 0.02);
+  border-radius: 8px;
+  transition: box-shadow 0.3s ease;
+}
+
+.ant-card:hover {
+  box-shadow: 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 6px 16px 0 rgba(0, 0, 0, 0.08),
+    0 9px 28px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* Button styles */
+.ant-btn {
+  border-radius: 6px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.ant-btn-primary {
+  background: #1677ff;
+}
+
+.ant-btn-primary:hover {
+  background: #0958d9;
+}
+
+.ant-btn-default:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+}
+
+/* Tag styles */
+.ant-tag {
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+/* Select & Input styles */
+.ant-select-selector,
+.ant-input,
+.ant-picker {
+  border-radius: 6px !important;
+}
+
+.ant-select-focused .ant-select-selector {
+  border-color: #1677ff !important;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1) !important;
+}
+
+.ant-input-focused,
+.ant-input:focus {
+  border-color: #1677ff !important;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1) !important;
+}
+
+/* Modal styles */
+.ant-modal-header {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.ant-modal-content {
+  border-radius: 8px;
+}
+
+/* Empty state */
+.ant-empty-description {
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* Spacing utilities */
+h1 {
+  margin-bottom: 16px;
+  color: #001529;
+  font-weight: 600;
+}
+
+h2 {
+  color: #001529;
+  font-weight: 600;
+}
+
+/* Layout improvements */
+.ant-layout {
+  background: #f5f7fa;
+}
+
+.ant-layout-header {
+  background: #ffffff;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.ant-layout-footer {
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+}
+
+/* Form improvements */
+.ant-form-item-label > label {
+  font-weight: 500;
+  color: rgba(0, 0, 0, 0.85);
+}
+
+.ant-form-item-required::before {
+  content: '*';
+  color: #ff4d4f;
+  margin-right: 4px;
+}
+
+/* Popconfirm */
+.ant-popover-arrow-content {
+  background-color: #ffffff;
+  box-shadow: 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 6px 16px 0 rgba(0, 0, 0, 0.08);
+}
+
+/* Notification/Message */
+.ant-message-notice-content {
+  box-shadow: 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 6px 16px 0 rgba(0, 0, 0, 0.08),
+    0 9px 28px 8px rgba(0, 0, 0, 0.05);
+}
