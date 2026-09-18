@@ -15,3 +15,7 @@ build/
 
 
 .codegraph
+# Ghi âm cuộc gọi: dữ liệu khách hàng, không bao giờ được commit
+audio/recordings/
+audio/eval/
+*.pcm

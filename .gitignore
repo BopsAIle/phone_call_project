@@ -8,3 +8,7 @@ __pycache__/
 *.log
 .idea/
 .dev.pids
+
+# Ghi âm cuộc gọi: dữ liệu khách hàng, không bao giờ được commit
+AI/audio/recordings/
+AI/audio/eval/
