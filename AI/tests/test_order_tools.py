@@ -455,3 +455,167 @@ def test_select_branch_resets_menu_and_cart() -> None:
     assert session.menu == []
     assert session.menu_ready is False
     assert session.cart == []
+
+
+# --- giỏ hàng: update_cart / remove_from_cart (trước đây không có test nào) ---
+
+
+async def _cart_with_two_pho_lines() -> tuple[CallSession, OrderTools]:
+    """Cùng một món trên hai dòng, khác ghi chú — chỉ có thể dựng qua add_to_cart."""
+    session = _session_ready()
+    client = FakeOrderClient(menu=[PHO])
+    tools = OrderTools(session, client, ScriptedMenuMatcher())
+    await tools.execute(
+        "add_to_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 1, "note": "ít cay"})
+    )
+    await tools.execute(
+        "add_to_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 1, "note": "nhiều hành"})
+    )
+    assert len(session.cart) == 2
+    return session, tools
+
+
+async def test_update_cart_single_line_without_note() -> None:
+    session = _session_ready()
+    client = FakeOrderClient(menu=[PHO])
+    tools = OrderTools(session, client, ScriptedMenuMatcher())
+    await tools.execute("add_to_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 1}))
+    payload = json.loads(
+        await tools.execute("update_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 3}))
+    )
+    assert payload["ok"] is True
+    assert session.cart[0].quantity == 3
+
+
+async def test_update_cart_ambiguous_line_asks_instead_of_crashing() -> None:
+    session, tools = await _cart_with_two_pho_lines()
+    payload = json.loads(
+        await tools.execute("update_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 3}))
+    )
+    assert payload["ok"] is False
+    assert payload["error"] == "ambiguous_line"
+    assert len(payload["lines"]) == 2
+    assert {row.get("note") for row in payload["lines"]} == {"ít cay", "nhiều hành"}
+    assert [line.quantity for line in session.cart] == [1, 1]
+
+
+async def test_update_cart_with_note_picks_the_right_line() -> None:
+    session, tools = await _cart_with_two_pho_lines()
+    payload = json.loads(
+        await tools.execute(
+            "update_cart",
+            json.dumps({"menu_item_id": "pho-bo", "quantity": 5, "note": "nhiều hành"}),
+        )
+    )
+    assert payload["ok"] is True
+    by_note = {line.note: line.quantity for line in session.cart}
+    assert by_note == {"ít cay": 1, "nhiều hành": 5}
+
+
+async def test_update_cart_not_in_cart() -> None:
+    session = _session_ready()
+    tools = OrderTools(session, FakeOrderClient(menu=[PHO]), ScriptedMenuMatcher())
+    payload = json.loads(
+        await tools.execute("update_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 2}))
+    )
+    assert payload == {"ok": False, "error": "not_in_cart"}
+
+
+async def test_update_cart_rejects_bad_quantity() -> None:
+    session = _session_ready()
+    tools = OrderTools(session, FakeOrderClient(menu=[PHO]), ScriptedMenuMatcher())
+    for bad in (0, 51, "hai", None):
+        payload = json.loads(
+            await tools.execute(
+                "update_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": bad})
+            )
+        )
+        assert payload == {"ok": False, "error": "invalid_quantity"}, bad
+
+
+async def test_remove_from_cart_without_note_removes_every_line() -> None:
+    session, tools = await _cart_with_two_pho_lines()
+    payload = json.loads(
+        await tools.execute("remove_from_cart", json.dumps({"menu_item_id": "pho-bo"}))
+    )
+    assert payload["ok"] is True
+    assert session.cart == []
+
+
+async def test_remove_from_cart_with_note_removes_one_line() -> None:
+    session, tools = await _cart_with_two_pho_lines()
+    payload = json.loads(
+        await tools.execute(
+            "remove_from_cart", json.dumps({"menu_item_id": "pho-bo", "note": "ít cay"})
+        )
+    )
+    assert payload["ok"] is True
+    assert [line.note for line in session.cart] == ["nhiều hành"]
+
+
+# --- create_order phải dùng kết quả kiểm tra của _apply_order_details ---
+
+
+async def _cart_ready_for_pickup() -> tuple[CallSession, FakeOrderClient, OrderTools]:
+    session = _session_ready()
+    client = FakeOrderClient(menu=[PHO])
+    tools = OrderTools(session, client, ScriptedMenuMatcher())
+    await tools.execute("add_to_cart", json.dumps({"menu_item_id": "pho-bo", "quantity": 1}))
+    await tools.execute("set_fulfillment", json.dumps({"fulfillment": "pickup"}))
+    return session, client, tools
+
+
+async def test_create_order_rejects_short_phone_without_posting() -> None:
+    session, client, tools = await _cart_ready_for_pickup()
+    payload = json.loads(
+        await tools.execute("create_order", json.dumps({**_CREATE_ARGS, "phone_number": "5"}))
+    )
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_fields"
+    assert payload["fields"] == ["phone_number"]
+    assert client.created == []
+    assert session.order_created is False
+
+
+async def test_create_order_rejects_unparseable_date_without_posting() -> None:
+    session, client, tools = await _cart_ready_for_pickup()
+    payload = json.loads(
+        await tools.execute(
+            "create_order", json.dumps({**_CREATE_ARGS, "booking_date": "thứ ba tuần sau"})
+        )
+    )
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_fields"
+    assert "booking_date" in payload["fields"]
+    assert client.created == []
+
+
+async def test_create_order_keeps_valid_args_when_another_is_invalid() -> None:
+    """Trường hợp lệ vẫn được lưu — khách không phải đọc lại từ đầu."""
+    session, client, tools = await _cart_ready_for_pickup()
+    await tools.execute(
+        "create_order",
+        json.dumps({**_CREATE_ARGS, "customer_name": "Trần Thị B", "phone_number": "5"}),
+    )
+    assert session.order_customer_name == "Trần Thị B"
+    assert client.created == []
+
+
+async def test_create_order_falls_back_to_stored_phone_when_caller_id_missing() -> None:
+    session, client, tools = await _cart_ready_for_pickup()
+    session.from_number = ""
+    await tools.execute("save_order_details", json.dumps({"phone_number": "0901234567"}))
+    payload = json.loads(
+        await tools.execute(
+            "create_order", json.dumps({**_CREATE_ARGS, "use_caller_number": True})
+        )
+    )
+    assert payload["ok"] is True, payload
+    assert client.created[0]["customer_phone"] == "0901234567"
+
+
+async def test_create_order_still_posts_when_everything_is_valid() -> None:
+    session, client, tools = await _cart_ready_for_pickup()
+    payload = json.loads(await tools.execute("create_order", json.dumps(_CREATE_ARGS)))
+    assert payload["ok"] is True
+    assert len(client.created) == 1

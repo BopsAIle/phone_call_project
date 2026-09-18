@@ -4,7 +4,13 @@ import json
 
 from booking.matcher import ScriptedBranchMatcher, coerce_match_result
 from booking.models import Branch, MatchResult, Restaurant
-from booking.tools import BookingTools, normalize_booking_date, normalize_booking_time, resolve_booking_when
+from booking.tools import (
+    BookingTools,
+    normalize_booking_date,
+    normalize_booking_time,
+    normalize_customer_phone,
+    resolve_booking_when,
+)
 from bridge.session import CallSession
 from tests.fakes import FakeRestaurantClient
 
@@ -252,3 +258,68 @@ async def test_create_booking_rejects_missing_restaurant() -> None:
     payload = json.loads(await tools.execute("create_booking", json.dumps(_BOOKING_ARGS)))
     assert payload == {"ok": False, "error": "no_restaurant"}
     assert client.created == []
+
+
+# --- A6: số điện thoại phải hợp lý về độ dài ---
+
+
+def test_normalize_customer_phone_table() -> None:
+    cases = [
+        ("0901234567", "0901234567"),      # số nội địa bình thường
+        ("+84912345678", "0912345678"),    # E.164 Việt Nam -> dạng nhà hàng bấm được
+        ("84 91 234 5678", "0912345678"),  # có khoảng trắng
+        ("0123 456 789", "0123456789"),
+        ("+1 415 555 0132", "14155550132"),  # nước khác: giữ nguyên, không đoán
+        ("5", ""),                          # nghe nhầm một chữ số
+        ("0912", ""),                       # quá ngắn
+        ("", ""),
+        ("không có số", ""),
+        ("1" * 16, ""),                     # vượt trần E.164
+    ]
+    for raw, expected in cases:
+        assert normalize_customer_phone(raw) == expected, raw
+
+
+def test_normalize_customer_phone_keeps_boundary_lengths() -> None:
+    assert normalize_customer_phone("1" * 8) == "1" * 8
+    assert normalize_customer_phone("1" * 15) == "1" * 15
+    assert normalize_customer_phone("1" * 7) == ""
+
+
+async def test_create_booking_reports_invalid_phone_not_missing() -> None:
+    """Nghe không ra số khác với chưa hỏi số — hai câu hỏi lại khác nhau."""
+    session = _session_with_catalog()
+    session.select_branch("mk")
+    client = FakeRestaurantClient()
+    tools = BookingTools(session, client, ScriptedBranchMatcher())
+    payload = json.loads(
+        await tools.execute("create_booking", json.dumps({**_BOOKING_ARGS, "phone_number": "5"}))
+    )
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_phone"
+    assert payload["fields"] == ["phone_number"]
+    assert client.created == []
+    assert session.booking_created is False
+
+
+async def test_create_booking_reports_missing_phone_when_never_given() -> None:
+    session = _session_with_catalog()
+    session.select_branch("mk")
+    client = FakeRestaurantClient()
+    tools = BookingTools(session, client, ScriptedBranchMatcher())
+    args = {key: value for key, value in _BOOKING_ARGS.items() if key != "phone_number"}
+    payload = json.loads(await tools.execute("create_booking", json.dumps(args)))
+    assert payload["ok"] is False
+    assert payload["error"] == "missing_fields"
+    assert "phone_number" in payload["fields"]
+    assert client.created == []
+
+
+async def test_create_booking_still_posts_a_valid_phone() -> None:
+    session = _session_with_catalog()
+    session.select_branch("mk")
+    client = FakeRestaurantClient()
+    tools = BookingTools(session, client, ScriptedBranchMatcher())
+    payload = json.loads(await tools.execute("create_booking", json.dumps(_BOOKING_ARGS)))
+    assert payload["ok"] is True, payload
+    assert client.created[0]["customer_phone"] == "0123456789"

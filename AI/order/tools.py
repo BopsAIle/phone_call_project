@@ -15,6 +15,7 @@ from booking.tools import (
     resolve_booking_when,
 )
 from order.models import CartLine, MenuItem, MenuMatchResult
+from stt.phonetic import confident_pick, rank
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,15 @@ ORDER_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "customer_response": {
+                        "type": "string",
+                        "description": (
+                            "One short sentence to say to the caller right now, while this is "
+                            "being sent to the restaurant. Under about 12 words, present tense, "
+                            "plain spoken language. Example: 'Alright, I am placing that order "
+                            "now.' Never say it succeeded — the result is not known yet."
+                        ),
+                    },
                     "customer_name": {"type": "string"},
                     "phone_number": {"type": "string"},
                     "booking_date": {
@@ -244,6 +254,7 @@ ORDER_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": [
+                    "customer_response",
                     "customer_name",
                     "booking_date",
                     "booking_time",
@@ -349,7 +360,9 @@ def _find_cart_index(session: Any, menu_item_id: str, note: Optional[str]) -> in
         return matches[0]
     if not matches:
         return -1
-        return -2
+    # Same dish on two lines with different notes, and the model did not say which.
+    # -2 means "ask the caller"; returning either line would silently edit the wrong one.
+    return -2
 
 
 def order_missing_fields(session: Any) -> list[str]:
@@ -629,6 +642,16 @@ class OrderTools:
         session.menu_ready = True
         return None
 
+    async def preload_menu(self) -> None:
+        """Best-effort menu warm-up. Never raises: a cold menu is not a call-ending error."""
+        try:
+            error = await self._ensure_menu()
+        except Exception:
+            logger.warning("Menu preload crashed", exc_info=True)
+            return
+        if error is not None:
+            logger.info("Menu preload skipped: %s", error.get("error") or error.get("reason") or "unknown")
+
     async def _menu_from_cache(self, branch_id: str) -> Optional[list[MenuItem]]:
         if self._cache is None or not branch_id:
             return None
@@ -671,10 +694,23 @@ class OrderTools:
         items = list(getattr(session, "menu", None) or [])
         if not items:
             return {"status": "none", "reason": "empty_menu"}
-        if self._matcher is None:
+        # STT hands us what the caller sounded like ("chicken singer combo"), so
+        # score the menu phonetically first. A clear winner needs no LLM round trip;
+        # anything short of that still narrows what the matcher has to read.
+        scored = rank(spoken, items)
+        picked = confident_pick(scored)
+        if picked is not None:
+            logger.info("Phonetic match %r -> %s (%.2f)", spoken, picked.name, scored[0][0])
+            matched = MenuMatchResult(
+                status="match",
+                menu_item_id=picked.id,
+                confidence="high",
+                confirm_name=picked.name,
+            )
+        elif self._matcher is None:
             matched = MenuMatchResult(status="none")
         else:
-            matched = await self._matcher.match(spoken, items)
+            matched = await self._matcher.match(spoken, [item for _, item in scored])
         payload: dict[str, Any] = {
             "status": matched.status,
             "confidence": matched.confidence,
@@ -714,10 +750,15 @@ class OrderTools:
             if len(exact) == 1:
                 logger.info("add_to_cart recovered %r by name -> %s", spoken, exact[0].name)
                 return exact[0]
+        scored = rank(readable, items)
+        picked = confident_pick(scored)
+        if picked is not None:
+            logger.info("add_to_cart recovered %r by phonetics -> %s", spoken, picked.name)
+            return picked
         if self._matcher is None:
             return None
         try:
-            matched = await self._matcher.match(readable, items)
+            matched = await self._matcher.match(readable, [item for _, item in scored])
         except Exception:
             logger.exception("add_to_cart recovery match failed for %r", spoken)
             return None
@@ -793,7 +834,21 @@ class OrderTools:
         note_arg = None if note is None else str(note)
         index = _find_cart_index(session, menu_item_id, note_arg)
         if index == -2:
-            return {"ok": False, "error": "ambiguous_line"}
+            # Hand back the competing lines so the model can read them out instead of
+            # guessing; a bare error leaves it with nothing to say.
+            return {
+                "ok": False,
+                "error": "ambiguous_line",
+                "next_step": (
+                    "ask the caller which one they mean, then call update_cart again "
+                    "with the matching note"
+                ),
+                "lines": [
+                    row
+                    for row in _cart_public(session)
+                    if row["menu_item_id"] == menu_item_id
+                ],
+            }
         if index < 0:
             return {"ok": False, "error": "not_in_cart"}
         session.cart[index].quantity = quantity
@@ -893,7 +948,25 @@ class OrderTools:
         cart = list(getattr(session, "cart", None) or [])
         if not cart:
             return {"ok": False, "error": "empty_cart"}
-        _apply_order_details(session, args)
+        # save_order_details surfaces this list; create_order used to drop it, so a bad
+        # phone or date passed here was silently ignored and the order went out with the
+        # previously stored value while the model believed it had just updated it.
+        invalid = _apply_order_details(session, args)
+        if invalid == ["use_caller_number"] and str(
+            getattr(session, "order_customer_phone", "") or ""
+        ).strip():
+            # Carrier gave us no number, but the caller already dictated one earlier.
+            # Falling back to it is what happened before this check existed.
+            invalid = []
+        if invalid:
+            payload: dict[str, Any] = {
+                "ok": False,
+                "error": "invalid_fields",
+                "fields": invalid,
+                "next_step": "ask the caller to repeat the fields listed, then try again",
+            }
+            payload.update(_order_details_public(session))
+            return payload
         fulfillment = str(getattr(session, "fulfillment", "") or "").strip().lower()
         if fulfillment not in {"delivery", "pickup"}:
             return {"ok": False, "error": "no_fulfillment"}
@@ -957,6 +1030,10 @@ class OrderTools:
                 body["delivery_phone"] = delivery_phone
         if note:
             body["note"] = note
+        # Khoá chống trùng: POST timeout rồi gửi lại cũng chỉ ra một đơn.
+        call_id = str(getattr(session, "call_id", "") or "").strip()
+        if call_id:
+            body["call_id"] = call_id
 
         result = await self._client.create_order(body)
         if not result.ok:

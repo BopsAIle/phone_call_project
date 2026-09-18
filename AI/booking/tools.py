@@ -70,6 +70,15 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "customer_response": {
+                        "type": "string",
+                        "description": (
+                            "One short sentence to say to the caller right now, while this is "
+                            "being sent to the restaurant. Under about 12 words, present tense, "
+                            "plain spoken language. Example: 'Alright, I am placing that order "
+                            "now.' Never say it succeeded — the result is not known yet."
+                        ),
+                    },
                     "customer_name": {"type": "string"},
                     "phone_number": {"type": "string"},
                     "use_caller_number": {
@@ -95,6 +104,7 @@ BOOKING_TOOLS: list[dict[str, Any]] = [
                     "note": {"type": "string"},
                 },
                 "required": [
+                    "customer_response",
                     "customer_name",
                     "party_size",
                     "booking_date",
@@ -220,16 +230,28 @@ def normalize_booking_time(raw: str) -> Optional[str]:
     return f"{hour:02d}:{minute:02d}"
 
 
+# A mis-heard digit word used to become a valid-looking phone number: "5" passed the
+# old non-empty check and reached the restaurant. 15 is the E.164 ceiling; 8 is below
+# any national number we serve and still rejects the single-digit junk STT produces.
+MIN_PHONE_DIGITS = 8
+MAX_PHONE_DIGITS = 15
+
+
 def normalize_customer_phone(raw: str) -> str:
     """Digits only, and Vietnamese E.164 back to the national form staff can dial.
 
     Caller ID arrives as +84912345678, and a model reading it back gives the same
     digits. The restaurant expects 0912345678, so 84 + 9 or 10 digits becomes 0 + rest.
     Other country codes are left alone; we cannot guess their national format.
+
+    Returns "" for anything outside the plausible length range, so every caller already
+    branching on a falsy result rejects it without knowing about the bound.
     """
     digits = "".join(ch for ch in (raw or "") if ch.isdigit())
     if digits.startswith("84") and len(digits) in {11, 12}:
-        return "0" + digits[2:]
+        digits = "0" + digits[2:]
+    if not MIN_PHONE_DIGITS <= len(digits) <= MAX_PHONE_DIGITS:
+        return ""
     return digits
 
 
@@ -401,6 +423,17 @@ class BookingTools:
         if not customer_name:
             missing.append("customer_name")
         if not phone_number:
+            # "They gave a number we cannot use" and "they never gave one" need different
+            # questions. missing_fields makes the model ask from scratch, as if it had
+            # never asked at all, which is maddening on the third attempt.
+            raw_phone = str(args.get("phone_number") or args.get("customer_phone") or "").strip()
+            if raw_phone or args.get("use_caller_number") is True:
+                return {
+                    "ok": False,
+                    "error": "invalid_phone",
+                    "fields": ["phone_number"],
+                    "next_step": "ask the caller to say the number again, digit by digit",
+                }
             missing.append("phone_number")
         if not booking_date:
             missing.append("booking_date")
@@ -422,6 +455,10 @@ class BookingTools:
         }
         if note:
             body["note"] = note
+        # Khoá chống trùng: POST timeout rồi gửi lại cũng chỉ ra một đơn.
+        call_id = str(getattr(session, "call_id", "") or "").strip()
+        if call_id:
+            body["call_id"] = call_id
 
         result = await self._client.create_booking(body)
         if not result.ok:
