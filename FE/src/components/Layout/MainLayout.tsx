@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Layout, Menu, MenuProps, theme } from 'antd'
-import { HomeOutlined, ShopOutlined, BranchesOutlined, CalendarOutlined, UnorderedListOutlined, ShoppingCartOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
+import { HomeOutlined, ShopOutlined, BranchesOutlined, CalendarOutlined, UnorderedListOutlined, ShoppingCartOutlined, PhoneOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { APP_NAME } from '../../utils/constants'
 
@@ -40,6 +40,11 @@ const items: MenuItem[] = [
     key: '/bookings',
     icon: <CalendarOutlined style={{ fontSize: '16px' }} />,
     label: 'Đặt bàn',
+  },
+  {
+    key: '/calls',
+    icon: <PhoneOutlined style={{ fontSize: '16px' }} />,
+    label: 'Cuộc gọi',
   },
 ]
 

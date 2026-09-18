@@ -300,3 +300,36 @@ def test_aggregator_streams_a_price_in_many_tokens() -> None:
     if remainder:
         out.append(remainder)
     assert out == ["Tổng cộng là 19.000 đồng.", "Cảm ơn."]
+
+def test_system_prompt_asks_for_a_number_when_caller_id_is_not_dialable() -> None:
+    """Máy SIP và số giấu không đọc lại được — phải quay về nhánh hỏi số.
+
+    Cuộc gọi thật 18/09 nhận from="4mgtb3k0duz6@sip.telnyx.com"; lọc chữ số còn "4306"
+    nên AI hỏi "Is the number you are calling from, 4 3 0 6, the right one for the
+    order?", khách nói có, rồi save_order_details trả invalid_fields hai lần liền.
+    """
+    for unusable in ("4mgtb3k0duz6@sip.telnyx.com", "anonymous", "unknown", "+84"):
+        prompt = build_system_prompt(
+            store_name="LongWang",
+            timezone="UTC",
+            locale="en",
+            service_choice="3",
+            caller_number=unusable,
+        )
+        assert "phone number, and what food you would like" in prompt
+        assert "the right one for the order" not in prompt
+        assert "use_caller_number" not in prompt
+        assert "4 3 0 6" not in prompt
+
+
+def test_system_prompt_still_reads_back_a_real_caller_id() -> None:
+    prompt = build_system_prompt(
+        store_name="LongWang",
+        timezone="UTC",
+        locale="en",
+        service_choice="3",
+        caller_number="+84912345678",
+    )
+    assert "8 4 9 1 2 3 4 5 6 7 8" in prompt
+    assert "the right one for the order" in prompt
+    assert "use_caller_number" in prompt

@@ -10,6 +10,7 @@ from datetime import datetime, timezone as dt_timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol
 from zoneinfo import ZoneInfo
 
+from booking.tools import normalize_customer_phone
 from obs.timing import bump, mark_first, put_value
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,14 @@ def build_system_prompt(
     lang = locale or "en"
     name = store_name or "the restaurant"
     caller_number = (caller_number or "").strip()
+    # Không phải cuộc gọi nào cũng mang theo số gọi được: máy SIP gửi
+    # "4mgtb3k0duz6@sip.telnyx.com", khách giấu số thì gửi "anonymous". Bỏ hết ký tự
+    # không phải chữ số khỏi mấy thứ đó còn lại rác — cái URI kia đọc lên thành
+    # "4 3 0 6" — và AI đem rác đó ra hỏi khách. Nhánh đọc lại số chỉ dùng khi số qua
+    # được đúng phép kiểm tra mà tool dùng lúc lưu, nếu không thì quay về hỏi số.
+    if caller_number and not normalize_customer_phone(caller_number):
+        logger.info("Caller ID không dùng được (%r); sẽ hỏi khách số điện thoại", caller_number)
+        caller_number = ""
     spoken = _spoken_digits(caller_number)
     # Nothing to ask when the restaurant has one branch or one is already locked.
     branch_rule = BRANCH_SKIP if (len(list(branches or [])) <= 1 or selected_branch_name) else BRANCH_ASK

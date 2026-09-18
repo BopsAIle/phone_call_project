@@ -28,3 +28,16 @@ export const BRANCH_STATUS_LABELS = {
   inactive: 'Không hoạt động',
   maintenance: 'Bảo trì',
 }
+
+export const CALL_STATUS_LABELS = {
+  in_progress: 'Đang gọi',
+  completed: 'Đã kết thúc',
+  failed: 'Lỗi',
+}
+
+export const CALL_INTENT_LABELS = {
+  unknown: 'Chưa rõ',
+  booking: 'Đặt bàn',
+  pickup: 'Mang về',
+  delivery: 'Giao hàng',
+}
