@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
-_DEFAULT_API_BASE = "http://127.0.0.1:3001"
+_DEFAULT_API_BASE = "http://127.0.0.1:8070"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -27,12 +27,24 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings(BaseModel):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
-    openai_stt_model: str = "gpt-4o-mini-transcribe"
+    # gpt-4o-transcribe, not gpt-live-transcribe: measured against the API, the
+    # live model rejects `turn_detection` ("Turn detection is not supported for
+    # this transcription model"), and this pipeline needs server VAD for barge-in
+    # and turn boundaries. The live model's `keywords` are worth revisiting only
+    # once we commit the input buffer ourselves.
+    openai_stt_model: str = "gpt-4o-transcribe"
+    # ISO-639-1 hints. Add a second one only if the menu carries foreign names
+    # AND the eval set shows it helps — a spare language is also a way for the
+    # model to mis-assign a short English turn.
+    openai_stt_languages: str = "en"
+    # Mốc chờ im lặng trước khi chốt lượt. 800 là mặc định có chủ đích (xem
+    # stt/realtime.vad_config); chỉnh để A/B, và chỉ đổi khi có số đo.
+    stt_silence_duration_ms: int = Field(default=800, ge=100, le=5000)
     openai_tts_model: str = "tts-1"
     openai_tts_voice: str = "nova"
     ai_bridge_token: str = ""
     ai_bridge_host: str = "0.0.0.0"
-    ai_bridge_port: int = 8080
+    ai_bridge_port: int = 8071
     log_level: str = "INFO"
     tts_chunk_bytes: int = Field(default=1024, ge=2)
     restaurant_api_base: str = _DEFAULT_API_BASE
@@ -50,6 +62,12 @@ class Settings(BaseModel):
     dtmf_menu_timeout_seconds: int = Field(default=7, ge=1)
     dtmf_debounce_ms: int = Field(default=500, ge=0)
     dtmf_max_invalid: int = Field(default=2, ge=0)
+    # Ghi âm tiếng người gọi để dựng bộ đo STT. Rỗng = tắt; đây là toàn bộ công tắc.
+    # Bật lên thì nhớ bổ sung câu thông báo ghi âm vào lời chào.
+    # Lưu thông tin cuộc gọi + transcript lên BE. Tắt được để chạy test offline.
+    call_log_enabled: bool = True
+    call_record_dir: str = ""
+    call_record_max_seconds: int = Field(default=600, ge=1)
     # Legacy /v1/bridge socket (telephony backend + browser demo). Off = Telnyx only.
     bridge_enabled: bool = True
     # --- Telnyx Call Control v2 + Media Streaming ---
@@ -81,12 +99,15 @@ def load_settings() -> Settings:
     return Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
-        openai_stt_model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe").strip(),
+        openai_stt_model=os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe").strip()
+        or "gpt-4o-transcribe",
+        openai_stt_languages=os.getenv("OPENAI_STT_LANGUAGES", "en").strip() or "en",
+        stt_silence_duration_ms=int(os.getenv("STT_SILENCE_DURATION_MS", "800")),
         openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "tts-1").strip(),
         openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "nova").strip(),
         ai_bridge_token=os.getenv("AI_BRIDGE_TOKEN", "").strip(),
         ai_bridge_host=os.getenv("AI_BRIDGE_HOST", "0.0.0.0").strip(),
-        ai_bridge_port=int(os.getenv("AI_BRIDGE_PORT", "8080")),
+        ai_bridge_port=int(os.getenv("AI_BRIDGE_PORT", "8071")),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip(),
         tts_chunk_bytes=int(os.getenv("TTS_CHUNK_BYTES", "1024")),
         restaurant_api_base=restaurant_api_base,
@@ -103,6 +124,9 @@ def load_settings() -> Settings:
         dtmf_menu_timeout_seconds=int(os.getenv("DTMF_MENU_TIMEOUT_SECONDS", "7")),
         dtmf_debounce_ms=int(os.getenv("DTMF_DEBOUNCE_MS", "500")),
         dtmf_max_invalid=int(os.getenv("DTMF_MAX_INVALID", "2")),
+        call_log_enabled=_env_bool("CALL_LOG_ENABLED", True),
+        call_record_dir=os.getenv("CALL_RECORD_DIR", "").strip(),
+        call_record_max_seconds=int(os.getenv("CALL_RECORD_MAX_SECONDS", "600")),
         bridge_enabled=_env_bool("BRIDGE_ENABLED", True),
         telnyx_enabled=_env_bool("TELNYX_ENABLED", False),
         telnyx_api_key=os.getenv("TELNYX_API_KEY", "").strip(),

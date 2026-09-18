@@ -9,11 +9,16 @@ import logging
 import time
 from array import array
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
+from audio.recorder import CallRecorder
 from audio.resample import OPENAI_RATE, even_pcm16
+from calls.logger import CallLogger, ROLE_ASSISTANT, ROLE_TOOL, ROLE_USER
+from stt.context import build_keywords, build_prompt
 from booking.client import normalize_hotline
+from booking.matcher import looks_like_branch_mention
 from booking.models import Branch, Restaurant
 from booking.tools import BOOKING_TOOL_NAMES, BOOKING_TOOLS, BookingTools
 from bridge.protocol import (
@@ -25,6 +30,8 @@ from bridge.protocol import (
     SERVICE_BY_DIGIT,
     VALID_DTMF_DIGITS,
 )
+from llm.history import repair_tool_sequence
+from obs.timing import TurnTimer, add_ms, put_value, set_timer
 from llm.stream import (
     INVALID_MENU_EN,
     SERVICE_MENU_EN,
@@ -72,19 +79,33 @@ def greeting_has_service_menu(text: str, locale: str) -> bool:
     return "press 1" in lowered or "ấn phím 1" in lowered or "phím 1" in lowered
 
 
-def ensure_intent_greeting(greeting: str, locale: str) -> str:
-    """Keep the backend greeting, and append the DTMF service menu when missing."""
-    text = (greeting or "").strip()
-    menu = _menu_for_locale(locale)
-    if not menu:
-        return text
-    if greeting_has_service_menu(text, locale):
+RECORDING_NOTICE_EN = "This call is recorded for quality purposes."
+
+
+def _append_sentence(text: str, addition: str) -> str:
+    text = (text or "").strip()
+    if not addition:
         return text
     if not text:
-        return menu
+        return addition
     if text[-1] in ".!?…":
-        return f"{text} {menu}"
-    return f"{text}. {menu}"
+        return f"{text} {addition}"
+    return f"{text}. {addition}"
+
+
+def ensure_intent_greeting(greeting: str, locale: str, *, recording: bool = False) -> str:
+    """Keep the backend greeting, and append the DTMF service menu when missing.
+
+    With recording on, the notice goes in front of the menu: a caller who presses a key
+    during the menu must already have heard it.
+    """
+    text = (greeting or "").strip()
+    if recording and RECORDING_NOTICE_EN.casefold() not in text.casefold():
+        text = _append_sentence(text, RECORDING_NOTICE_EN)
+    menu = _menu_for_locale(locale)
+    if not menu or greeting_has_service_menu(text, locale):
+        return text
+    return _append_sentence(text, menu)
 
 
 class CallState(str, Enum):
@@ -140,6 +161,22 @@ class CallSession:
     invalid_digit_count: int = 0
     last_digit_at: float = 0.0
     last_dtmf_digit: str = ""
+    # Bộ ghi âm sống ở đây chứ không ở CallPipeline: TurnPlayer chỉ cầm session, và câu
+    # AI nói chỉ được đánh dấu từ trong đó (khi tiếng đã thật sự ra dây).
+    recorder: Any = None
+    # Bật khi CALL_RECORD_DIR có giá trị: lời chào phải nói rõ cuộc gọi được ghi âm.
+    record_notice: bool = False
+    # Bộ gom transcript, cùng lý do với recorder: TurnPlayer chỉ cầm session.
+    call_log: Any = None
+
+    def mark_recording(self, event: str, text: str = "") -> None:
+        if self.recorder is not None:
+            self.recorder.mark(event, text)
+
+    def note_agent_speech(self, text: str) -> None:
+        """Chỉ gọi khi tiếng đã thật sự ra dây — transcript phải là thứ khách đã nghe."""
+        if self.call_log is not None:
+            self.call_log.note("assistant", text)
 
     def cart_summary_text(self) -> str:
         parts: list[str] = []
@@ -183,12 +220,38 @@ class CallSession:
             return
         self.history.append({"role": "assistant", "content": text})
 
+    def commit_tool_round(self, group: list[dict[str, Any]]) -> None:
+        """Append a whole tool round in one go.
+
+        Synchronous on purpose: the event loop cannot interleave inside `extend`, so a
+        tool_calls message can never be separated from its replies.
+        """
+        self.history.extend(group)
+
+    def repair_history(self) -> None:
+        """Heal a history left malformed by an earlier turn. No-op when already valid."""
+        repaired = repair_tool_sequence(self.history)
+        if len(repaired) == len(self.history) and all(
+            a is b for a, b in zip(repaired, self.history)
+        ):
+            return
+        logger.warning(
+            "Repaired malformed tool sequence in history %s (%s -> %s messages)",
+            self.tag,
+            len(self.history),
+            len(repaired),
+        )
+        # Rebind contents, not the list: other objects hold a reference to it.
+        self.history[:] = repaired
+
     def apply_init(self, payload: dict[str, Any]) -> None:
         self.call_id = str(payload.get("callId") or "")
         self.store_name = str(payload.get("storeName") or "")
         self.timezone = str(payload.get("timezone") or "UTC")
         self.locale = str(payload.get("locale") or "en")
-        self.greeting = ensure_intent_greeting(str(payload.get("greeting") or ""), self.locale)
+        self.greeting = ensure_intent_greeting(
+            str(payload.get("greeting") or ""), self.locale, recording=self.record_notice
+        )
         self.to_number = normalize_hotline(str(payload.get("toNumber") or payload.get("to") or ""))
         self.from_number = str(payload.get("fromNumber") or payload.get("from") or "").strip()
         self.inited = True
@@ -343,6 +406,8 @@ class TurnPlayer:
         """Demo UI: telephony backends may ignore this event."""
         if self.session.closed or not text:
             return
+        self.session.mark_recording("agent", text)
+        self.session.note_agent_speech(text)
         try:
             await self.outbound.send_json(
                 {
@@ -401,6 +466,9 @@ class CallPipeline:
         dtmf_menu_timeout_seconds: int = 7,
         dtmf_debounce_ms: int = 500,
         dtmf_max_invalid: int = 2,
+        call_record_dir: str = "",
+        call_record_max_seconds: int = 600,
+        call_log_client: Any = None,
     ) -> None:
         self.websocket = websocket
         self.stt = stt
@@ -413,7 +481,20 @@ class CallPipeline:
         self._dtmf_menu_timeout_seconds = max(int(dtmf_menu_timeout_seconds), 0)
         self._dtmf_debounce_ms = max(int(dtmf_debounce_ms), 0)
         self._dtmf_max_invalid = max(int(dtmf_max_invalid), 0)
+        self._call_record_dir = (call_record_dir or "").strip()
+        self._call_record_max_seconds = max(int(call_record_max_seconds), 1)
+        self._recorder: Any = None
+        self._recorder_tried = False
+        # Bộ gom transcript. Không có client thì mọi lời gọi thành no-op.
+        self._call_log = CallLogger(call_log_client) if call_log_client is not None else None
+        self._started_at = datetime.now(timezone.utc)
+        self._booking_id = ""
+        self._order_id = ""
+        self._speech_stopped_at: Optional[float] = None
+        self._tools_this_turn: list[str] = []
         self.session = CallSession()
+        self.session.record_notice = bool(self._call_record_dir)
+        self.session.call_log = self._call_log
         self._booking = (
             BookingTools(self.session, restaurant_client, matcher) if restaurant_client is not None else None
         )
@@ -446,6 +527,7 @@ class CallPipeline:
         self._pcm_peak = 0
         self._pcm_log_at = 0.0
         self._pcm_heard = False
+        self._stt_context_sig: tuple[Any, ...] = ()
 
     async def run(self) -> None:
         # Khởi động dịch vụ speech to text
@@ -498,6 +580,12 @@ class CallPipeline:
             self._pending_24k.clear()
             if not blob:
                 return
+            # Record exactly what STT is about to hear, nothing else — that is the only
+            # audio worth evaluating. Bytes dropped by the pre-ready cap stay out.
+            recorder = self._ensure_recorder()
+            if recorder is not None:
+                recorder.feed(blob)
+                await recorder.maybe_flush()
             try:
                 await self.stt.append_pcm24(blob)
             except Exception:
@@ -510,6 +598,74 @@ class CallPipeline:
         if overflow > 0:
             drop = overflow + (overflow % 2)
             del self._pending_24k[:drop]
+
+    def _ensure_recorder(self) -> Any:
+        """Created on the first audio frame, by which point call_id is known."""
+        if self._recorder is None and not self._recorder_tried:
+            self._recorder_tried = True
+            self._recorder = CallRecorder.maybe(
+                self._call_record_dir,
+                self.session.call_id,
+                max_seconds=self._call_record_max_seconds,
+            )
+            self.session.recorder = self._recorder
+        return self._recorder
+
+    def _mark_recording(self, event: str, text: str = "") -> None:
+        self.session.mark_recording(event, text)
+
+    def _start_call_log(self) -> None:
+        """Mở bản ghi cuộc gọi khi đã biết nhà hàng. Chạy nền, không chặn lời chào."""
+        if self._call_log is None or not self.session.call_id:
+            return
+        body: dict[str, Any] = {
+            "call_id": self.session.call_id,
+            "started_at": self._started_at.isoformat(),
+        }
+        if self.session.restaurant_id:
+            body["restaurant_id"] = self.session.restaurant_id
+        if self.session.selected_branch_id:
+            body["branch_id"] = self.session.selected_branch_id
+        store = self.session.restaurant_name or self.session.store_name
+        if store:
+            body["store_name"] = store
+        if self.session.from_number:
+            body["from_number"] = self.session.from_number[:32]
+        if self.session.to_number:
+            body["to_number"] = self.session.to_number[:32]
+        if self.session.locale:
+            body["locale"] = self.session.locale[:16]
+        self._call_log.start(body)
+
+    def _note_call_log(self, role: str, content: str, *, tool_name: str = "") -> None:
+        if self._call_log is not None:
+            self._call_log.note(role, content, tool_name=tool_name)
+
+    def _call_end_body(self) -> dict[str, Any]:
+        ended = datetime.now(timezone.utc)
+        body: dict[str, Any] = {
+            "status": "completed",
+            "ended_at": ended.isoformat(),
+            "duration_seconds": max(0, int((ended - self._started_at).total_seconds())),
+            "intent": self._call_log_intent(),
+        }
+        if self.session.selected_branch_id:
+            body["branch_id"] = self.session.selected_branch_id
+        if self._booking_id:
+            body["booking_id"] = self._booking_id
+        if self._order_id:
+            body["order_id"] = self._order_id
+        return body
+
+    def _call_log_intent(self) -> str:
+        if self.session.intent == "booking" or self.session.booking_created:
+            return "booking"
+        fulfillment = (self.session.fulfillment or "").strip().lower()
+        if fulfillment == "delivery":
+            return "delivery"
+        if fulfillment == "pickup":
+            return "pickup"
+        return "unknown"
 
     def _note_inbound_pcm(self, data: bytes) -> None:
         if not data:
@@ -583,12 +739,7 @@ class CallPipeline:
         )
         if self._restaurant is not None or self._cache is not None:
             self._catalog_task = asyncio.create_task(self._load_catalog(), name="catalog")
-        update = getattr(self.stt, "update_language", None)
-        if update is not None:
-            try:
-                await update(self.session.locale)
-            except Exception:
-                logger.exception("STT language update failed %s", self.session.tag)
+        await self._push_stt_context()
         self._spawn(self._run_greeting())
 
 
@@ -645,6 +796,42 @@ class CallPipeline:
         finally:
             self.session.catalog_ready = True
             self.session.refresh_system_prompt()
+            await self._preload_menu()
+            await self._push_stt_context()
+            self._start_call_log()
+
+    async def _preload_menu(self) -> None:
+        """Warm session.menu as soon as the branch is known.
+
+        OrderTools only loads it when the LLM calls search_menu — one turn *after*
+        the caller has already said a dish name. Loading it here is what lets the
+        dish names reach STT before they are needed, not after.
+        """
+        if self._order is None or getattr(self.session, "menu_ready", False):
+            return
+        await self._order.preload_menu()
+
+    async def _push_stt_context(self) -> None:
+        """Bias the live STT session with this restaurant's own vocabulary."""
+        update = getattr(self.stt, "update_context", None)
+        if update is None:
+            return
+        keywords = build_keywords(
+            self.session.store_name,
+            self.session.branches,
+            self.session.menu,
+        )
+        signature = (self.session.store_name, tuple(keywords))
+        if signature == self._stt_context_sig:
+            return
+        self._stt_context_sig = signature
+        try:
+            await update(
+                prompt=build_prompt(self.session.store_name, keywords),
+                keywords=keywords,
+            )
+        except Exception:
+            logger.exception("STT context push failed %s", self.session.tag)
 
     async def _pin_cache_generation(self) -> None:
         if self._cache is None or self.session.cache_generation:
@@ -694,6 +881,7 @@ class CallPipeline:
 
     async def on_speech_started(self) -> None:
         await self._cancel_hangup()
+        self._mark_recording("speech_started")
         await self._notify_transcript("started")
         async with self._turn_lock:
             if self.session.closed or self.session.state in (CallState.CLOSED, CallState.BARGE_IN, CallState.LISTENING):
@@ -706,6 +894,7 @@ class CallPipeline:
                 await self._barge_in()
 
     async def on_speech_stopped(self) -> None:
+        self._speech_stopped_at = time.monotonic()
         logger.debug("speech_stopped %s", self.session.tag)
 
     async def on_transcript_delta(self, delta: str) -> None:
@@ -721,6 +910,9 @@ class CallPipeline:
                 logger.info("Người gọi: %s", spoken)
             else:
                 logger.info("Người gọi: (trống — STT không ra chữ) %s", self.session.tag)
+            self._mark_recording("transcript", spoken)
+            if spoken:
+                self._note_call_log(ROLE_USER, spoken)
             await self._notify_transcript("completed", spoken)
             if self.session.awaiting_choice and spoken:
                 self.session.awaiting_choice = False
@@ -739,19 +931,24 @@ class CallPipeline:
         creating = name in {"create_booking", "create_order"}
         if creating:
             self._create_in_flight = True
+        started = time.monotonic()
         try:
             if name in BOOKING_TOOL_NAMES and self._booking is not None:
                 result = await self._booking.execute(name, arguments_json)
                 self._note_created_this_turn(name, result)
+                self._note_call_log(ROLE_TOOL, result, tool_name=name)
                 return result
             if name in ORDER_TOOL_NAMES and self._order is not None:
                 result = await self._order.execute(name, arguments_json)
                 self._note_created_this_turn(name, result)
+                self._note_call_log(ROLE_TOOL, result, tool_name=name)
                 if name == "create_order":
                     await self._notify_order_created(result)
                 return result
             return json.dumps({"ok": False, "error": "unknown_tool"})
         finally:
+            add_ms("tool_ms", (time.monotonic() - started) * 1000.0)
+            self._tools_this_turn.append(name)
             if creating:
                 self._create_in_flight = False
 
@@ -764,6 +961,13 @@ class CallPipeline:
             return
         if isinstance(payload, dict) and payload.get("ok") and not payload.get("already_created"):
             self._created_this_turn = True
+            # Giữ id để nối cuộc gọi với đơn: khách khiếu nại thì tra ngược được.
+            created_id = str(payload.get("booking_id") or payload.get("order_id") or "").strip()
+            if created_id:
+                if name == "create_booking":
+                    self._booking_id = created_id
+                else:
+                    self._order_id = created_id
 
     async def _notify_transcript(self, status: str, text: str = "") -> None:
         """Demo UI: telephony backends may ignore this event."""
@@ -838,6 +1042,20 @@ class CallPipeline:
                 self.session.refresh_system_prompt()
         if not self.session.history:
             self.session.refresh_system_prompt()
+        # Heal anything an earlier turn left malformed before we send it back to the API.
+        self.session.repair_history()
+        # Đặt ở đây, không phải ở on_transcript_completed: ContextVar được sao sang task
+        # con lúc create_task, nên các task TTS do TurnPlayer sinh ra mới thấy được.
+        timer = TurnTimer(
+            self.session.call_id[-12:] if self.session.call_id else "",
+            t0=self._speech_stopped_at,
+            fields={"gen": self.session.generation_id},
+        )
+        if self._speech_stopped_at is not None:
+            timer.first("stt_ms")
+        self._speech_stopped_at = None
+        self._tools_this_turn = []
+        set_timer(timer)
         player = TurnPlayer(self.session, self.outbound, self.tts, self.session.locale)
         self._player = player
         gen = player.generation_id
@@ -853,6 +1071,9 @@ class CallPipeline:
                 and not from_dtmf
                 and not self.session.selected_branch_id
                 and len(self.session.branches) > 1
+                # Cửa chắn rẻ: không có tín hiệu nào chỉ tới chi nhánh thì bỏ qua hẳn
+                # một lần gọi OpenAI nối tiếp trước lượt nói chính.
+                and looks_like_branch_mention(text, self.session.branches)
             ):
                 try:
                     raw = await self._booking.resolve_branch(text)
@@ -865,6 +1086,13 @@ class CallPipeline:
                         )
                 except Exception:
                     logger.exception("Pre-lock branch from utterance failed %s", self.session.tag)
+            elif (
+                self._booking is not None
+                and not from_dtmf
+                and not self.session.selected_branch_id
+                and len(self.session.branches) > 1
+            ):
+                logger.info("Branch gate skipped the matcher %s: %r", self.session.tag, text[:80])
             kwargs: dict[str, Any] = {}
             tools: list[dict[str, Any]] = []
             if self._booking is not None:
@@ -874,6 +1102,9 @@ class CallPipeline:
             if tools:
                 kwargs["tools"] = tools
                 kwargs["execute_tool"] = self._execute_tool
+                # The streamer builds each tool round locally and hands it back here; it
+                # no longer appends into history itself.
+                kwargs["on_tool_round"] = self.session.commit_tool_round
             async for sentence in self.llm.stream_sentences(
                 self.session.history,
                 lambda: self.session.generation_id != gen or self.session.closed,
@@ -903,6 +1134,13 @@ class CallPipeline:
         finally:
             if self._player is player:
                 self._player = None
+            if self._tools_this_turn:
+                put_value("tools", ",".join(self._tools_this_turn))
+            timer.emit(logger)
+            set_timer(None)
+            # The turn may have locked a branch or pulled the menu; re-bias STT for
+            # the next one. Cheap: the signature check skips an unchanged catalog.
+            await self._push_stt_context()
 
     def _spawn(self, coro: Any) -> None:
         previous = self._work_task
@@ -1134,6 +1372,16 @@ class CallPipeline:
         self.session.closed = True
         self.session.state = CallState.CLOSED
         self.session.playing = False
+        if self._recorder is not None:
+            recorder, self._recorder = self._recorder, None
+            self.session.recorder = None
+            with contextlib.suppress(Exception):
+                await recorder.close()
+        if self._call_log is not None:
+            call_log, self._call_log = self._call_log, None
+            self.session.call_log = None
+            with contextlib.suppress(Exception):
+                await call_log.finish(self._call_end_body())
         if self._player is not None:
             await self._player.abort()
             self._player = None

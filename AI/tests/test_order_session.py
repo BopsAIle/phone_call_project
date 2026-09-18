@@ -64,22 +64,29 @@ def _arm_delivery_order(pipeline: CallPipeline) -> None:
     pipeline.session.delivery_address = "12 Nguyễn Trãi"
 
 
-async def test_greeting_does_not_fetch_menu() -> None:
+async def test_greeting_preloads_menu_to_bias_stt() -> None:
+    """The menu must reach STT as keywords BEFORE the caller names a dish.
+
+    search_menu would only load it a turn later — by then the dish name has
+    already been transcribed, badly.
+    """
     ws = FakeBridgeSocket()
     restaurant = FakeRestaurantClient(result=LONGWANG)
     orders = FakeOrderClient(menu=[PHO])
+    stt = FakeSTT()
     pipeline, task = await _start_pipeline(
         ws,
-        FakeSTT(),
+        stt,
         ScriptedLlm([]),
         ScriptedTts(),
         restaurant_client=restaurant,
         order_client=orders,
     )
     await _init(ws, pipeline, {**INIT, "toNumber": "1900636886"})
-    assert orders.menu_lookups == []
-    assert pipeline.session.menu_ready is False
+    assert orders.menu_lookups == [("rest-1", "mk")]
+    assert pipeline.session.menu_ready is True
     assert pipeline.session.selected_branch_id == "mk"
+    assert PHO.name in stt.keywords
     await _stop(ws, task)
 
 
@@ -390,4 +397,133 @@ async def test_create_order_does_not_resend_success_event() -> None:
     assert second["already_created"] is True
     events = [e for e in _control_events(ws) if e.get("event") == "order.created"]
     assert len(events) == 1
+    await _stop(ws, task)
+
+
+# --- A2: barge-in đúng lúc tạo đơn không được làm hỏng sổ hội thoại ---
+
+
+class SlowOrderClient(FakeOrderClient):
+    """create_order treo cho tới khi test thả ra, để barge-in rơi vào giữa POST."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def create_order(self, body: dict):
+        self.entered.set()
+        await self.release.wait()
+        return await super().create_order(body)
+
+
+async def test_barge_in_during_create_order_keeps_history_valid() -> None:
+    """Lỗi cũ: câu AI vừa nói chen vào giữa lệnh gọi tool và kết quả tool.
+
+    OpenAI từ chối nguyên request khi thấy hình dạng đó, và vì sổ hội thoại không bao
+    giờ được sửa lại nên MỌI lượt sau đều lỗi — khách nghe câu xin lỗi lặp vô tận.
+    """
+    from llm.history import is_well_formed
+    from llm.stream import OpenAiLlm
+    from tests.fakes import FakeChatCompletions, LlmRound
+
+    ws = FakeBridgeSocket()
+    restaurant = FakeRestaurantClient(result=LONGWANG)
+    orders = SlowOrderClient(menu=[PHO])
+    client = FakeChatCompletions(
+        [
+            # Nói xong rồi gọi tool NGAY TRONG CÙNG một vòng — đây mới là hình dạng
+            # sinh ra lỗi: câu đã phát ra loa trước khi tool kịp trả kết quả.
+            LlmRound(
+                text="Dạ em đang lên đơn cho mình.",
+                tools=[("call_1", "create_order", json.dumps(_CREATE_ARGS))],
+            ),
+            LlmRound(text="Đơn của mình đã xong."),
+        ]
+    )
+    pipeline, task = await _start_pipeline(
+        ws,
+        FakeSTT(),
+        OpenAiLlm(client, "gpt-4o-mini"),
+        ScriptedTts(),
+        restaurant_client=restaurant,
+        order_client=orders,
+        menu_matcher=ScriptedMenuMatcher(),
+        matcher=ScriptedBranchMatcher(),
+    )
+    await _init(ws, pipeline, {**INIT, "toNumber": "1900636886"})
+    _arm_delivery_order(pipeline)
+
+    await pipeline.on_transcript_completed("chốt đơn giúp em")
+    await asyncio.wait_for(orders.entered.wait(), timeout=2)
+
+    # Khách nói chen vào đúng lúc POST đang bay. barge-in cố ý CHỜ tool tạo đơn xong
+    # (không huỷ), nên phải thả POST song song chứ không sau — đúng như đời thật.
+    barge = asyncio.create_task(pipeline.on_speech_started())
+    await asyncio.sleep(0.02)
+    orders.release.set()
+    await asyncio.wait_for(barge, timeout=2)
+    await asyncio.sleep(0.05)
+
+    history = pipeline.session.history
+    assert is_well_formed(history), [m.get("role") for m in history]
+    roles = [m.get("role") for m in history]
+    call_at = roles.index("assistant", roles.index("user"))
+    while history[call_at].get("tool_calls") is None:
+        call_at = roles.index("assistant", call_at + 1)
+    assert roles[call_at + 1] == "tool"
+    assert history[call_at + 1]["tool_call_id"] == "call_1"
+    # Đơn vẫn được tạo: barge-in dừng tiếng, không huỷ POST đã bay
+    assert len(orders.created) == 1
+    await _stop(ws, task)
+
+
+async def test_next_turn_after_barge_in_create_still_works() -> None:
+    """Hệ quả thật sự của lỗi cũ: lượt kế tiếp phải chạy bình thường."""
+    from llm.stream import OpenAiLlm
+    from tests.fakes import FakeChatCompletions, LlmRound
+
+    ws = FakeBridgeSocket()
+    restaurant = FakeRestaurantClient(result=LONGWANG)
+    orders = SlowOrderClient(menu=[PHO])
+    client = FakeChatCompletions(
+        [
+            LlmRound(
+                text="Dạ em đang lên đơn cho mình.",
+                tools=[("call_1", "create_order", json.dumps(_CREATE_ARGS))],
+            ),
+            LlmRound(text="Đơn của mình đã xong rồi ạ."),
+        ]
+    )
+    tts = ScriptedTts()
+    pipeline, task = await _start_pipeline(
+        ws,
+        FakeSTT(),
+        OpenAiLlm(client, "gpt-4o-mini"),
+        tts,
+        restaurant_client=restaurant,
+        order_client=orders,
+        menu_matcher=ScriptedMenuMatcher(),
+        matcher=ScriptedBranchMatcher(),
+    )
+    await _init(ws, pipeline, {**INIT, "toNumber": "1900636886"})
+    _arm_delivery_order(pipeline)
+
+    await pipeline.on_transcript_completed("chốt đơn giúp em")
+    await asyncio.wait_for(orders.entered.wait(), timeout=2)
+    barge = asyncio.create_task(pipeline.on_speech_started())
+    await asyncio.sleep(0.02)
+    orders.release.set()
+    await asyncio.wait_for(barge, timeout=2)
+    await asyncio.sleep(0.05)
+
+    await pipeline.on_transcript_completed("bao lâu thì tới ạ")
+    await asyncio.sleep(0.05)
+
+    # Lượt sau nói được, và lịch sử gửi lên API ở lượt đó đúng hình dạng
+    assert "Đơn của mình đã xong rồi ạ." in tts.spoken
+    last_request = client.requests[-1]["messages"]
+    for index, message in enumerate(last_request):
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            assert last_request[index + 1]["role"] == "tool"
     await _stop(ws, task)

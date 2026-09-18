@@ -17,6 +17,7 @@ from bridge.session import CallPipeline
 from cache.redis_store import CatalogCache
 from config import Settings, load_settings
 from booking.client import RestaurantClient
+from calls.client import CallLogClient
 from booking.matcher import OpenAiBranchMatcher
 from llm.stream import OpenAiLlm
 from order.client import OrderClient
@@ -112,6 +113,7 @@ def create_app(
     menu_matcher: Any = None,
     catalog_cache: Any = None,
     catalog_syncer: Any = None,
+    call_log_client: Any = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     if not settings.ai_bridge_token:
@@ -220,8 +222,19 @@ def create_app(
             chunk_bytes=settings.tts_chunk_bytes,
         )
 
+    stt_languages = tuple(
+        code.strip().lower()
+        for code in settings.openai_stt_languages.split(",")
+        if code.strip()
+    ) or ("en",)
+
     def default_stt_factory() -> RealtimeTranscriptionClient:
-        return RealtimeTranscriptionClient(openai_client, settings.openai_stt_model)
+        return RealtimeTranscriptionClient(
+            openai_client,
+            settings.openai_stt_model,
+            languages=stt_languages,
+            silence_duration_ms=settings.stt_silence_duration_ms,
+        )
     #app.state là túi đựng của FastAPI, gắn vào object app, sống suốt lúc server chạy.
     # Restart process thì mất, tạo lại lúc create_app().
     if restaurant_client is None:
@@ -232,6 +245,8 @@ def create_app(
         order_client = OrderClient(settings.restaurant_api_base)
     if menu_matcher is None and openai_client is not None:
         menu_matcher = OpenAiMenuMatcher(openai_client, settings.openai_model)
+    if call_log_client is None and settings.call_log_enabled:
+        call_log_client = CallLogClient(settings.restaurant_api_base)
     app.state.stt_factory = stt_factory or default_stt_factory
     app.state.llm = llm
     app.state.tts = tts  # tts: 1 client tts được tạo ra từ openai_client
@@ -239,6 +254,7 @@ def create_app(
     app.state.branch_matcher = matcher
     app.state.order_client = order_client
     app.state.menu_matcher = menu_matcher
+    app.state.call_log_client = call_log_client
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -291,6 +307,9 @@ def create_app(
             dtmf_menu_timeout_seconds=settings.dtmf_menu_timeout_seconds,
             dtmf_debounce_ms=settings.dtmf_debounce_ms,
             dtmf_max_invalid=settings.dtmf_max_invalid,
+            call_record_dir=settings.call_record_dir,
+            call_record_max_seconds=settings.call_record_max_seconds,
+            call_log_client=getattr(app.state, "call_log_client", None),
         )
 
     app.state.build_pipeline = build_pipeline
