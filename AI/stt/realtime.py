@@ -15,12 +15,90 @@ TRANSCRIPT_DELTA = "conversation.item.input_audio_transcription.delta"
 TRANSCRIPT_DONE = "conversation.item.input_audio_transcription.completed"
 TRANSCRIPT_FAILED = "conversation.item.input_audio_transcription.failed"
 
+# Tuned for non-native callers: they hesitate mid-sentence, and a 450 ms cut
+# chops the turn into fragments that give the model almost no context to work with.
 VAD = {
     "type": "server_vad",
-    "threshold": 0.3,
-    "prefix_padding_ms": 300,
-    "silence_duration_ms": 450,
+    "threshold": 0.45,
+    "prefix_padding_ms": 400,
+    "silence_duration_ms": 800,
 }
+
+def vad_config(silence_duration_ms: int | None = None) -> dict[str, Any]:
+    """VAD mặc định, có thể chỉnh riêng mốc chờ im lặng.
+
+    800 ms là mặc định **có chủ đích**: playbook đo được mốc cũ 450 ms cắt vụn câu của
+    người nói tiếng Anh không phải bản ngữ, làm STT nghe sai nhiều hơn. Đây là chặng chờ
+    cố định lớn nhất mỗi lượt, nên biến môi trường tồn tại để A/B có số đo — đừng hạ khi
+    chưa chạy scripts/turn_stats.py trước và sau.
+    """
+    cfg = dict(VAD)
+    if silence_duration_ms:
+        cfg["silence_duration_ms"] = int(silence_duration_ms)
+    return cfg
+
+
+def build_transcription_session(
+    model: str,
+    languages: tuple[str, ...],
+    *,
+    prompt: str = "",
+    keywords: tuple[str, ...] = (),
+    silence_duration_ms: int = 0,
+    noise_reduction: dict[str, str] | None = None,
+    unsupported: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Cấu hình phiên transcription. Một nguồn duy nhất cho cả runtime lẫn công cụ đo.
+
+    Trước đây scripts/stt_eval.py tự dựng cấu hình riêng, và nó bỏ quên `prompt` —
+    mà `prompt` là kênh mớm tên món DUY NHẤT trên gpt-4o-transcribe. Nghĩa là công cụ
+    đo một cấu hình khác với cấu hình chạy thật, đúng ở chiều đang muốn tinh chỉnh.
+    Gộp về một hàm để chuyện lệch đó không thể xảy ra lần nữa.
+    """
+    transcription: dict[str, Any] = {"model": model}
+    langs = tuple(languages) or ("en",)
+
+    def put(field: str, value: Any) -> None:
+        if field not in unsupported and value:
+            transcription[field] = value
+
+    if model in NEW_MODELS:
+        # `languages` and `language` are mutually exclusive — sending both is rejected.
+        put("languages", list(langs))
+        put("delay", TRANSCRIPTION_DELAY)
+        put("keywords", list(keywords))
+    else:
+        transcription["language"] = langs[0]
+    put("prompt", prompt)
+    reduction = NOISE_REDUCTION if noise_reduction is None else noise_reduction
+    return {
+        "type": "transcription",
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": transcription,
+                "turn_detection": vad_config(silence_duration_ms),
+                "noise_reduction": dict(reduction) if reduction else None,
+            }
+        },
+    }
+
+
+# Only these two accept `keywords`; everything older takes `language` (singular).
+NEW_MODELS = frozenset({"gpt-transcribe", "gpt-live-transcribe"})
+
+# Higher delay lets the model hear more before it commits, at the cost of later
+# partials. "low" is the balance for a phone call; try "medium" if accuracy lags.
+TRANSCRIPTION_DELAY = "low"
+
+# The browser stopped running its own NS (it ate the fricatives a non-native
+# speaker already articulates weakly), so OpenAI cleans the signal instead.
+# Use "far_field" for speakerphone or a reverberant room.
+NOISE_REDUCTION: dict[str, str] | None = {"type": "near_field"}
+
+# Optional fields the server may reject depending on model/account. Rejecting one
+# must not cost us the session, so we drop it and re-send.
+OPTIONAL_FIELDS = ("delay", "keywords", "prompt", "languages")
 
 
 class SttHandler(Protocol):
@@ -78,10 +156,22 @@ def transcript_from_event(event: Any) -> str:
 
 ##stt
 class RealtimeTranscriptionClient:
-    def __init__(self, client: Any, model: str, call_id: str = "") -> None:
+    def __init__(
+        self,
+        client: Any,
+        model: str,
+        call_id: str = "",
+        languages: tuple[str, ...] = ("en",),
+        silence_duration_ms: int = 0,
+    ) -> None:
         self._client = client
         self._model = model
         self._call_id = call_id
+        self._languages = tuple(languages) or ("en",)
+        self._silence_ms = int(silence_duration_ms or 0)
+        self._prompt = ""
+        self._keywords: list[str] = []
+        self._unsupported: set[str] = set()
         self._handler: Optional[SttHandler] = None
         self._manager: Any = None
         self._connection: Any = None
@@ -90,12 +180,14 @@ class RealtimeTranscriptionClient:
         self.closed = False
         self._last_transcript_key = ""
         self._logged_events = 0
+        self._partial = ""
 
     @property
     def is_ready(self) -> bool:
         return self._connection is not None and not self.closed
 
     async def start(self, handler: SttHandler, locale: str | None = None) -> None:
+        del locale  # kept for the caller's signature; language comes from settings
         self._handler = handler
         if self._client is None:
             logger.error("No OpenAI client; STT disabled callId=%s", self._call_id)
@@ -105,7 +197,7 @@ class RealtimeTranscriptionClient:
                 extra_query={"intent": "transcription"},
             )
             self._connection = await self._manager.enter()
-            await self._connection.session.update(session=self._session_payload(locale))
+            await self._connection.session.update(session=self._session_payload())
             self._recv_task = asyncio.create_task(self._recv_loop(), name="stt-recv")
             self._ready.set()
             logger.info("Realtime transcription connected callId=%s", self._call_id)
@@ -113,31 +205,43 @@ class RealtimeTranscriptionClient:
             logger.exception("Failed to open Realtime transcription callId=%s", self._call_id)
             await self.close()
 
-    def _session_payload(self, locale: str | None) -> dict[str, Any]:
-        # Pin transcription.language to English: the deployment only handles
-        # English speech, so forcing "en" avoids auto-detect flip-flopping on
-        # short/noisy turns.
-        del locale  # pinned to English regardless of session locale
-        return {
-            "type": "transcription",
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": 24000},
-                    "transcription": {"model": self._model, "language": "en"},
-                    "turn_detection": dict(VAD),
-                    # Browser already filters; OpenAI NR before VAD can swallow laptop speech.
-                    "noise_reduction": None,
-                }
-            },
-        }
+    def _session_payload(self) -> dict[str, Any]:
+        return build_transcription_session(
+            self._model,
+            self._languages,
+            prompt=self._prompt,
+            keywords=tuple(self._keywords),
+            silence_duration_ms=self._silence_ms,
+            unsupported=frozenset(self._unsupported),
+        )
 
-    async def update_language(self, locale: str) -> None:
+    async def update_context(
+        self,
+        *,
+        prompt: str = "",
+        keywords: list[str] | None = None,
+    ) -> None:
+        """Re-bias the live session with what we now know the caller can order.
+
+        Safe to call repeatedly: the catalog arrives after the socket opens, and
+        the menu later still, so context is pushed in stages during the call.
+        """
+        if prompt:
+            self._prompt = prompt
+        if keywords is not None:
+            self._keywords = list(keywords)
         if not self._connection or self.closed:
             return
         try:
-            await self._connection.session.update(session=self._session_payload(locale))
+            await self._connection.session.update(session=self._session_payload())
+            logger.info(
+                "STT context updated callId=%s keywords=%s",
+                self._call_id,
+                len(self._keywords),
+            )
         except Exception:
-            logger.exception("STT session.update(language) failed callId=%s", self._call_id)
+            # A failed update must never kill the call; the previous session stands.
+            logger.exception("STT session.update(context) failed callId=%s", self._call_id)
 
     async def append_pcm24(self, pcm24: bytes) -> None:
         if not pcm24 or self.closed or self._connection is None:
@@ -168,6 +272,7 @@ class RealtimeTranscriptionClient:
         if et in {"session.created", "session.updated", "transcription_session.updated"}:
             logger.info("STT session event callId=%s type=%s", self._call_id, et)
         if et == SPEECH_STARTED:
+            self._partial = ""
             logger.info("STT speech_started callId=%s", self._call_id)
             await handler.on_speech_started()
         elif et == SPEECH_STOPPED:
@@ -175,7 +280,11 @@ class RealtimeTranscriptionClient:
             await handler.on_speech_stopped()
         elif et == TRANSCRIPT_DELTA:
             delta = _event_field(event, "delta", "") or ""
-            logger.debug("STT delta callId=%s %r", self._call_id, delta)
+            # Log the running partial so the caller's words appear on screen while
+            # they are still speaking, not only when the turn is committed.
+            self._partial += str(delta)
+            if self._partial.strip():
+                logger.info("Người gọi (đang nói): %s", self._partial.strip())
             await handler.on_transcript_delta(delta)
         elif et == TRANSCRIPT_DONE or et in {"conversation.item.done", "conversation.item.added"}:
             text = transcript_from_event(event)
@@ -189,7 +298,8 @@ class RealtimeTranscriptionClient:
                 return
             if key:
                 self._last_transcript_key = key
-            logger.info("Người gọi (STT): %s", text)
+            self._partial = ""
+            logger.info("Người gọi (STT) callId=%s: %s", self._call_id, text)
             await handler.on_transcript_completed(text)
         elif et == TRANSCRIPT_FAILED:
             logger.error("STT transcription failed callId=%s event=%s", self._call_id, event)
@@ -197,7 +307,9 @@ class RealtimeTranscriptionClient:
         elif et == "error":
             err = _event_field(event, "error", event)
             logger.error("Realtime error callId=%s %s", self._call_id, err)
-            await self._maybe_fallback_session(err)
+            if await self._maybe_drop_unsupported(err):
+                return
+            await self._warn_if_vad_unsupported(err)
         else:
             if "transcript" in et:
                 text = transcript_from_event(event)
@@ -207,41 +319,57 @@ class RealtimeTranscriptionClient:
                     return
             logger.debug("Realtime event %s callId=%s", et, self._call_id)
 
-    async def _maybe_fallback_session(self, err: Any) -> None:
-        """If the transcription model rejects VAD, use a silent realtime session."""
-        message = ""
+    @staticmethod
+    def _error_message(err: Any) -> str:
         if isinstance(err, dict):
-            message = str(err.get("message") or "")
-        else:
-            message = str(getattr(err, "message", err) or "")
-        lowered = message.lower()
-        if "turn_detection" not in lowered and "vad" not in lowered:
-            return
-        if self._connection is None:
-            return
+            return str(err.get("message") or "")
+        return str(getattr(err, "message", err) or "")
+
+    async def _maybe_drop_unsupported(self, err: Any) -> bool:
+        """Drop an optional field the server just rejected, then re-send.
+
+        Model/account support for `delay`, `keywords` and friends is not uniform,
+        and the docs disagree with the SDK on `delay`. Losing one hint beats losing
+        transcription for the whole call.
+        """
+        lowered = self._error_message(err).lower()
+        dropped = [
+            field
+            for field in OPTIONAL_FIELDS
+            if field in lowered and field not in self._unsupported
+        ]
+        if not dropped or self._connection is None or self.closed:
+            return False
+        self._unsupported.update(dropped)
         logger.warning(
-            "STT VAD rejected; falling back to realtime session with create_response=false callId=%s",
+            "STT rejected %s; retrying without it callId=%s",
+            ", ".join(dropped),
             self._call_id,
         )
         try:
-            await self._connection.session.update(
-                session={
-                    "type": "realtime",
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": 24000},
-                            "transcription": {"model": self._model, "language": "en"},
-                            "turn_detection": {
-                                **VAD,
-                                "create_response": False,
-                                "interrupt_response": False,
-                            },
-                        }
-                    },
-                }
-            )
+            await self._connection.session.update(session=self._session_payload())
         except Exception:
-            logger.exception("Fallback realtime session.update failed callId=%s", self._call_id)
+            logger.exception("STT retry without %s failed callId=%s", dropped, self._call_id)
+        return True
+
+    async def _warn_if_vad_unsupported(self, err: Any) -> None:
+        """Server VAD is not optional here — say so plainly instead of degrading.
+
+        Measured: gpt-live-transcribe answers "Turn detection is not supported for
+        this transcription model". Without VAD there is no speech_started (no
+        barge-in) and nothing commits the input buffer, so no transcript ever
+        arrives. Switching the session to type "realtime" is not a way out either:
+        the API refuses that on a transcription socket.
+        """
+        lowered = self._error_message(err).lower()
+        if "turn_detection" not in lowered and "turn detection" not in lowered:
+            return
+        logger.error(
+            "STT model %r does not support server VAD, so this call cannot detect "
+            "turns or barge-in. Set OPENAI_STT_MODEL to gpt-4o-transcribe. callId=%s",
+            self._model,
+            self._call_id,
+        )
 
     async def close(self) -> None:
         self.closed = True

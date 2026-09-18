@@ -8,6 +8,7 @@ import re
 from typing import Any, Optional, Protocol
 
 from booking.models import Branch, MatchResult
+from stt.phonetic import ACCEPT_MARGIN, normalize, similarity
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,118 @@ def match_unique_branch_name(spoken: str, branches: list[Branch]) -> Optional[Ma
     return None
 
 
+# Branch names are far more distinctive than dish names, so a whole-sentence scan is
+# safe here: measured on a 5-branch catalog, real mentions score >= 0.92 while ordinary
+# sentences ("I want to book a table for four") top out at 0.57.
+_PHONETIC_HIGH = 0.92
+_PHONETIC_LOW = 0.85
+_MAX_WINDOW_WORDS = 4
+_MAX_SPOKEN_WORDS = 30
+
+
+def _spoken_windows(spoken: str) -> list[str]:
+    """Every 1..4-word run in the sentence; the branch name sits somewhere inside it."""
+    words = normalize(spoken).split()[:_MAX_SPOKEN_WORDS]
+    out: list[str] = []
+    for size in range(1, _MAX_WINDOW_WORDS + 1):
+        for start in range(0, len(words) - size + 1):
+            window = " ".join(words[start : start + size])
+            if window not in _GENERIC_TOKENS:
+                out.append(window)
+    return out
+
+
+def match_phonetic_branch(spoken: str, branches: list[Branch]) -> Optional[MatchResult]:
+    """Catch a branch the caller mispronounced: 'down town' -> 'Downtown'. No LLM."""
+    if not (spoken or "").strip() or not branches:
+        return None
+    best: dict[str, float] = {}
+    for window in _spoken_windows(spoken):
+        for branch in branches:
+            if not branch.name:
+                continue
+            score = similarity(window, branch.name)
+            if score > best.get(branch.id, 0.0):
+                best[branch.id] = score
+    hits = sorted(
+        ((score, branch_id) for branch_id, score in best.items() if score >= _PHONETIC_LOW),
+        reverse=True,
+    )
+    if not hits:
+        return None
+    if len(hits) > 1 and hits[0][0] - hits[1][0] < ACCEPT_MARGIN:
+        return MatchResult(
+            status="ambiguous",
+            confidence="low",
+            candidate_ids=tuple(branch_id for _, branch_id in hits),
+        )
+    top_score, top_id = hits[0]
+    branch = next(item for item in branches if item.id == top_id)
+    return MatchResult(
+        status="match",
+        branch_id=branch.id,
+        # Below the high bar it is a hint, not a verdict: let the caller confirm.
+        confidence="high" if top_score >= _PHONETIC_HIGH else "low",
+        confirm_name=branch.name,
+    )
+
+
+_BRANCHY_WORDS = re.compile(
+    r"(chi\s*nh[aá]nh|c[oơ]\s*s[oở]|\bqu[aậ]n\b|\bbranch\b|\bstore\b|\blocation\b|"
+    r"\bshop\b|\boutlet\b|\bdistrict\b|\bstreet\b|\broad\b|\baddress\b|\bnear\b|"
+    r"\bg[aầ]n\b|\b[dđ][uư][oờ]ng\b|\bs[oố]\b)",
+    re.IGNORECASE,
+)
+_MIN_ADDRESS_OVERLAP = 2
+
+
+def _address_tokens(text: str) -> set[str]:
+    tokens = {
+        token
+        for token in _TOKEN_SPLIT.split(normalize(text or ""))
+        if len(token) >= 3 and token not in _GENERIC_TOKENS
+    }
+    # Số nhà là tín hiệu mạnh nhất trong một địa chỉ đọc bằng miệng, giữ cả số ngắn.
+    tokens |= {t for t in _TOKEN_SPLIT.split(normalize(text or "")) if t.isdigit()}
+    return tokens
+
+
+def _address_overlap(spoken: str, branches: list[Branch]) -> int:
+    said = _address_tokens(spoken)
+    if not said:
+        return 0
+    return max(
+        (len(said & _address_tokens(branch.address)) for branch in branches if branch.address),
+        default=0,
+    )
+
+
+def looks_like_branch_mention(spoken: str, branches: list[Branch]) -> bool:
+    """Câu này có khả năng nhắc tới một chi nhánh không? Không gọi mạng, không LLM.
+
+    Cửa chắn rẻ đặt trước bộ so khớp bằng LLM. Trước đây MỌI câu khách nói đều phải qua
+    một lần gọi OpenAI đầy đủ chỉ để hỏi "có phải tên chi nhánh không", kể cả "vâng" hay
+    "hai người" — và lần gọi đó nằm nối tiếp trước lần gọi chính.
+
+    Bỏ sót chỉ tốn thêm một vòng, và chỉ tốn ở đúng những câu khách thật sự nhắc chi
+    nhánh: tool `resolve_branch` vẫn còn, system prompt vẫn dạy model gọi nó.
+    """
+    text = (spoken or "").strip()
+    if not text or len(branches) < 2:
+        return False
+    if _name_refers_to_hcm(text):
+        return True
+    if match_unique_branch_name(text, branches) is not None:
+        return True
+    if match_phonetic_branch(text, branches) is not None:
+        return True
+    if _BRANCHY_WORDS.search(text):
+        return True
+    # Tên thôi chưa đủ: việc đáng giá nhất của bộ so khớp là ánh xạ một địa chỉ đọc
+    # bằng miệng ("106 Hoàng Quốc Việt") vào đúng chi nhánh.
+    return _address_overlap(text, branches) >= _MIN_ADDRESS_OVERLAP
+
+
 class BranchMatcher(Protocol):
     async def match(self, spoken_name: str, branches: list[Branch]) -> MatchResult:
         ...
@@ -307,6 +420,10 @@ class OpenAiBranchMatcher:
         unique = match_unique_branch_name(spoken, branches)
         if unique is not None and unique.confidence == "high":
             return unique
+        phonetic = match_phonetic_branch(spoken, branches)
+        if phonetic is not None and phonetic.status == "match" and phonetic.confidence == "high":
+            logger.info("Phonetic branch match %r -> %s", spoken[:60], phonetic.confirm_name)
+            return phonetic
         catalog = _catalog_for_judge(branches)
         expanded = expand_place_aliases(spoken)
         user = (

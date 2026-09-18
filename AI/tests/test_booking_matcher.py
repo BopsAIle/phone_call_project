@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from booking.matcher import OpenAiBranchMatcher, coerce_match_result
+from booking.matcher import OpenAiBranchMatcher, coerce_match_result, looks_like_branch_mention
 from booking.models import Branch
 
 Q1 = Branch(id="q1", name="Chi nhánh Quận 1", address="Nguyễn Huệ, Quận 1")
@@ -214,3 +214,52 @@ def test_branch_named_in_a_sentence_still_locks() -> None:
     assert result.status == "match"
     assert result.branch_id == "kfc"
     assert result.confidence == "high"
+
+
+# --- B3: cửa chắn rẻ trước bộ so khớp bằng LLM ---
+
+_GATE_BRANCHES = [
+    Branch(id="dt", name="Downtown", address="106 Hoang Quoc Viet Street"),
+    Branch(id="rv", name="Riverside", address="12 Nguyen Trai Road"),
+    Branch(id="ap", name="Airport Plaza", address="5 Le Loi, District 1"),
+]
+
+
+def test_gate_skips_utterances_that_mention_no_branch() -> None:
+    for text in [
+        "yes",
+        "two people",
+        "seven pm",
+        "my name is Thuc",
+        "I want to book a table",
+        "tomorrow at seven thirty",
+        "zero nine one two three four five six seven",
+        "a table for four please",
+        "no thanks",
+    ]:
+        assert looks_like_branch_mention(text, _GATE_BRANCHES) is False, text
+
+
+def test_gate_lets_real_branch_mentions_through() -> None:
+    for text in [
+        "downtown",
+        "down town",            # nghe nhầm — lưới ngữ âm bắt
+        "the riverside one",
+        "Airport Plaza",
+        "air port plaza",
+        "riverside please",
+        "the branch near District 1",
+        "which store is closest",
+    ]:
+        assert looks_like_branch_mention(text, _GATE_BRANCHES) is True, text
+
+
+def test_gate_lets_a_spoken_address_through() -> None:
+    """Việc đáng giá nhất của bộ so khớp là ánh xạ địa chỉ, không chỉ tên."""
+    assert looks_like_branch_mention("106 Hoang Quoc Viet", _GATE_BRANCHES) is True
+    assert looks_like_branch_mention("Le Loi street", _GATE_BRANCHES) is True
+
+
+def test_gate_is_off_when_there_is_nothing_to_choose() -> None:
+    assert looks_like_branch_mention("downtown", _GATE_BRANCHES[:1]) is False
+    assert looks_like_branch_mention("", _GATE_BRANCHES) is False
