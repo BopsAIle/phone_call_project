@@ -14,6 +14,7 @@ import { RestaurantsModule } from './restaurants/restaurants.module';
 import { BranchesModule } from './branches/branches.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { MenuModule } from './menu/menu.module';
+import { CallsModule } from './calls/calls.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { MenuModule } from './menu/menu.module';
     BranchesModule,
     BookingsModule,
     MenuModule,
+    CallsModule,
   ],
   controllers: [AppController],
   providers: [
