@@ -298,6 +298,18 @@ export class BookingsService {
    * 4. AI gửi booking với restaurant_id + branch_id
    */
   async createFromAI(createAIBookingDto: CreateAIBookingDto): Promise<Booking> {
+    // Chống đơn kép: AI gửi lại sau khi timeout thì BE có thể đã ghi rồi.
+    // Kiểm tra trước mọi validate khác để lần gửi lại không vấp luật "trùng giờ".
+    if (createAIBookingDto.call_id) {
+      const already = await this.bookingRepository.findByCallId(
+        createAIBookingDto.call_id,
+        'dine_in',
+      );
+      if (already) {
+        return already;
+      }
+    }
+
     // Validate restaurant exists and is active
     const restaurant = await this.restaurantsService.findOne(createAIBookingDto.restaurant_id);
     if (restaurant.status !== RestaurantStatus.ACTIVE) {
@@ -367,6 +379,7 @@ export class BookingsService {
 
     // Create booking (source = phone_ai, status = pending by default)
     const bookingData = {
+      call_id: createAIBookingDto.call_id ?? null,
       restaurant_id: createAIBookingDto.restaurant_id,
       branch_id: createAIBookingDto.branch_id,
       customer_name: createAIBookingDto.customer_name,

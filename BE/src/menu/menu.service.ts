@@ -79,6 +79,18 @@ export class MenuService {
   async createTakeoutBooking(
     createTakeoutBookingDto: CreateTakeoutBookingDto,
   ): Promise<Booking & { order_items: OrderItem[] }> {
+    // Chống đơn kép: AI gửi lại sau timeout thì BE có thể đã ghi đơn rồi.
+    if (createTakeoutBookingDto.call_id) {
+      const already = await this.bookingRepository.findByCallId(
+        createTakeoutBookingDto.call_id,
+        'takeout',
+      );
+      if (already) {
+        const items = await this.orderItemRepository.findByBookingId(already.id);
+        return { ...already, order_items: items };
+      }
+    }
+
     // Validate nhà hàng tồn tại và hoạt động
     const restaurant = await this.restaurantsService.findOne(
       createTakeoutBookingDto.restaurant_id,
@@ -191,6 +203,7 @@ export class MenuService {
       phone_number: createTakeoutBookingDto.customer_phone,
       booking_date: bookingDate,
       booking_time: createTakeoutBookingDto.booking_time,
+      call_id: createTakeoutBookingDto.call_id ?? null,
       booking_type: 'takeout',
       party_size: 0,
       total_price: totalPrice,
@@ -290,6 +303,18 @@ export class MenuService {
   async createDeliveryBooking(
     createDeliveryBookingDto: CreateDeliveryBookingDto,
   ): Promise<Booking & { order_items: OrderItem[] }> {
+    // Chống đơn kép: AI gửi lại sau timeout thì BE có thể đã ghi đơn rồi.
+    if (createDeliveryBookingDto.call_id) {
+      const already = await this.bookingRepository.findByCallId(
+        createDeliveryBookingDto.call_id,
+        'delivery',
+      );
+      if (already) {
+        const items = await this.orderItemRepository.findByBookingId(already.id);
+        return { ...already, order_items: items };
+      }
+    }
+
     // Validate nhà hàng tồn tại và hoạt động
     const restaurant = await this.restaurantsService.findOne(
       createDeliveryBookingDto.restaurant_id,
@@ -405,6 +430,7 @@ export class MenuService {
       phone_number: createDeliveryBookingDto.customer_phone,
       booking_date: bookingDate,
       booking_time: createDeliveryBookingDto.booking_time,
+      call_id: createDeliveryBookingDto.call_id ?? null,
       booking_type: 'delivery',
       party_size: 0,
       total_price: totalPrice,

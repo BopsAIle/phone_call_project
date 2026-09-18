@@ -12,7 +12,7 @@ from booking.models import BookingApiResult, Branch, HotlineResult, Restaurant
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://127.0.0.1:3001"
+DEFAULT_BASE_URL = "http://127.0.0.1:8070"
 _DEFAULT_TIMEOUT = 30.0
 
 ## Chuẩn hóa số điện thoại từ font-end gửi sang
@@ -76,6 +76,13 @@ def _phone_from_body(body: dict[str, Any]) -> str:
     return str(body.get("customer_phone") or body.get("phone_number") or "").strip()
 
 
+def attach_call_id(payload: dict[str, Any], body: dict[str, Any]) -> None:
+    """Khoá chống trùng của backend: cùng call_id thì trả về đơn cũ, không tạo đơn thứ hai."""
+    call_id = str(body.get("call_id") or "").strip()
+    if call_id:
+        payload["call_id"] = call_id[:128]
+
+
 def _ai_booking_body(body: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "restaurant_id": body["restaurant_id"],
@@ -89,6 +96,7 @@ def _ai_booking_body(body: dict[str, Any]) -> dict[str, Any]:
     note = str(body.get("note") or "").strip()
     if note:
         payload["note"] = note
+    attach_call_id(payload, body)
     return payload
 
 
@@ -106,6 +114,7 @@ def _public_booking_body(body: dict[str, Any]) -> dict[str, Any]:
     note = str(body.get("note") or "").strip()
     if note:
         payload["note"] = note
+    attach_call_id(payload, body)
     return payload
 
 

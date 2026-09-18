@@ -23,6 +23,13 @@ export class BookingRepository {
     });
   }
 
+  /** Khoá chống trùng: một cuộc gọi chỉ được tạo một đơn mỗi loại. */
+  async findByCallId(callId: string, bookingType: string): Promise<Booking | null> {
+    return await this.repository.findOne({
+      where: { call_id: callId, booking_type: bookingType as any },
+    });
+  }
+
   async findById(id: string): Promise<Booking | null> {
     return await this.repository.findOne({ 
       where: { id },

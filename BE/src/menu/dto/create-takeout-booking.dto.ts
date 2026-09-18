@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsNotEmpty,
   IsString,
@@ -114,4 +114,16 @@ export class CreateTakeoutBookingDto {
   @IsOptional()
   @IsString({ message: 'Ghi chú phải là chuỗi' })
   note?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Mã cuộc gọi đã tạo đơn này. Khoá chống trùng: gửi lại cùng mã trả về đơn cũ, ' +
+      'không tạo đơn thứ hai — dùng khi AI bị timeout và không biết BE đã ghi hay chưa.',
+    example: 'v3:abc123def456',
+    maxLength: 128,
+  })
+  @IsOptional()
+  @IsString({ message: 'Mã cuộc gọi phải là chuỗi' })
+  @Length(0, 128, { message: 'Mã cuộc gọi tối đa 128 ký tự' })
+  call_id?: string;
 }

@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { Restaurant } from '../../restaurants/entities/restaurant.entity';
 import { Branch } from '../../branches/entities/branch.entity';
 
@@ -48,6 +48,14 @@ export class Booking {
 
   @Column({ type: 'varchar', length: 50, nullable: true })
   order_code: string;
+
+  /**
+   * Mã cuộc gọi đã tạo ra đơn này. Dùng làm khoá chống trùng: AI gửi POST bị timeout
+   * thì BE có thể đã ghi rồi — gửi lại cùng call_id trả về đơn cũ thay vì tạo đơn thứ hai.
+   */
+  @Index()
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  call_id: string | null;
 
   @Column({ type: 'varchar', length: 255, nullable: false })
   customer_name: string;

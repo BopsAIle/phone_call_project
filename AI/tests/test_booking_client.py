@@ -165,3 +165,54 @@ async def test_create_booking_falls_back_to_public_endpoint() -> None:
     assert result.data["id"] == "bk-2"
     assert captured[0].endswith("/bookings/ai")
     assert captured[1].endswith("/bookings")
+
+
+async def test_call_id_is_sent_as_the_dedup_key() -> None:
+    """Không có khoá này thì POST timeout rồi gửi lại sẽ ra hai đơn."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={"data": {"id": "bk-1"}})
+
+    client = RestaurantClient(
+        "http://be", http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    await client.create_booking(
+        {
+            "restaurant_id": "r1",
+            "branch_id": "b1",
+            "customer_name": "A",
+            "customer_phone": "0901234567",
+            "party_size": 2,
+            "booking_date": "2026-09-04",
+            "booking_time": "18:30",
+            "call_id": "v3:abc123",
+        }
+    )
+    assert seen[0]["call_id"] == "v3:abc123"
+
+
+async def test_body_has_no_call_id_key_when_the_call_has_no_id() -> None:
+    """BE bật forbidNonWhitelisted — trường rỗng gửi lên là 400."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={"data": {"id": "bk-1"}})
+
+    client = RestaurantClient(
+        "http://be", http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    await client.create_booking(
+        {
+            "restaurant_id": "r1",
+            "branch_id": "b1",
+            "customer_name": "A",
+            "customer_phone": "0901234567",
+            "party_size": 2,
+            "booking_date": "2026-09-04",
+            "booking_time": "18:30",
+        }
+    )
+    assert "call_id" not in seen[0]

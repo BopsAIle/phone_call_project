@@ -10,12 +10,12 @@ from typing import Any, Optional
 
 import httpx
 
-from booking.client import unwrap_data
+from booking.client import attach_call_id, unwrap_data
 from order.models import MenuItem, MenuResult, OrderApiResult
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://127.0.0.1:3001"
+DEFAULT_BASE_URL = "http://127.0.0.1:8070"
 _DEFAULT_TIMEOUT = 30.0
 _AVAILABLE_STATUS = {"available"}
 _UNAVAILABLE_STATUS = {"unavailable", "sold_out", "sold-out"}
@@ -181,6 +181,7 @@ def _order_body(body: dict[str, Any]) -> dict[str, Any]:
             payload["delivery_phone"] = delivery_phone
         payload["delivery_fee"] = 0
         payload["estimated_delivery_time"] = booking_time
+    attach_call_id(payload, body)
     return payload
 
 
