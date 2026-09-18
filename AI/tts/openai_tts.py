@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+
+from obs.timing import mark_first
 from typing import Any, AsyncIterator, Callable, Protocol
 
 from audio.resample import even_pcm16
@@ -74,6 +76,7 @@ class OpenAiTts:
                     # Native 24 kHz already matches the wire; only keep whole samples.
                     pcm16 = even_pcm16(chunk, leftover)
                     if pcm16:
+                        mark_first("tts_ttfb_ms")
                         yield pcm16
         except Exception:
             logger.exception("TTS failed for %r", text[:80])

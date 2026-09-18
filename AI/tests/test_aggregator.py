@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from llm.stream import SentenceAggregator, build_system_prompt, fallback_phrase
+from llm.stream import (
+    SentenceAggregator,
+    build_system_prompt,
+    fallback_phrase,
+    is_sentence_boundary,
+    split_spoken_sentences,
+)
 
 
 def test_flush_on_period_with_lookahead() -> None:
@@ -229,3 +235,68 @@ def test_system_prompt_lists_missing_order_slots() -> None:
     )
     assert "still missing: orderer name" in prompt
     assert "Ask next: ask for orderer name" in prompt
+
+
+# --- A3: dấu chấm trong số và viết tắt không được coi là hết câu ---
+
+
+def test_split_keeps_decimals_and_abbreviations_whole() -> None:
+    cases = [
+        ("Your total is 19.000 VND.", ["Your total is 19.000 VND."]),
+        ("Item 1.5 kg and 2.0 kg.", ["Item 1.5 kg and 2.0 kg."]),
+        ("$19.99 total.", ["$19.99 total."]),
+        ("That is Mr. Smith at no. 12.", ["That is Mr. Smith at no. 12."]),
+        ("A. Nguyen called.", ["A. Nguyen called."]),
+    ]
+    for text, expected in cases:
+        assert split_spoken_sentences(text) == expected, text
+
+
+def test_split_still_breaks_real_sentence_ends() -> None:
+    cases = [
+        # Câu menu DTMF: bắt buộc phải tách, không được gộp
+        (
+            "To book a table, press 1. To order food, press 2.",
+            ["To book a table, press 1.", "To order food, press 2."],
+        ),
+        ("No. I mean yes.", ["No.", "I mean yes."]),
+        ("Section 3. Next thing", ["Section 3.", "Next thing"]),
+        ("Hello.\nNext", ["Hello.", "Next"]),
+        ("Ready? Go! Wait… More", ["Ready?", "Go!", "Wait…", "More"]),
+    ]
+    for text, expected in cases:
+        assert split_spoken_sentences(text) == expected, text
+
+
+def test_split_never_starts_a_fragment_with_punctuation() -> None:
+    """Lỗi cũ: 'Wait... okay' ra mảnh '.. okay' — TTS đọc thành tiếng vô nghĩa."""
+    for part in split_spoken_sentences("Wait... okay"):
+        assert part[:1] not in {".", "?", "!", "…"}, part
+
+
+def test_is_sentence_boundary_rules() -> None:
+    # dấu không phải chấm thì luôn hết câu
+    assert is_sentence_boundary(punct="?", head="Ready", gap=" ", nxt="G") is True
+    # chấm giữa hai chữ số, không có khoảng trắng
+    assert is_sentence_boundary(punct=".", head="19", gap="", nxt="0") is False
+    # có khoảng trắng thì lại là hết câu thật
+    assert is_sentence_boundary(punct=".", head="press 1", gap=" ", nxt="T") is True
+    # viết tắt
+    assert is_sentence_boundary(punct=".", head="That is Mr", gap=" ", nxt="S") is False
+    # "no." chỉ là số hiệu khi theo sau là chữ số
+    assert is_sentence_boundary(punct=".", head="at no", gap=" ", nxt="1") is False
+    assert is_sentence_boundary(punct=".", head="No", gap=" ", nxt="I") is True
+    # chuỗi dấu chấm liên tiếp
+    assert is_sentence_boundary(punct=".", head="Wait", gap="", nxt=".") is False
+
+
+def test_aggregator_streams_a_price_in_many_tokens() -> None:
+    """Token của LLM về từng mẩu, không về nguyên câu — cắt phải đúng ở mọi cách chia."""
+    agg = SentenceAggregator()
+    out: list[str] = []
+    for token in ["Tổng", " cộng", " là", " 19", ".", "000", " đồng", ".", " Cảm", " ơn."]:
+        out.extend(agg.push(token))
+    remainder = agg.flush()
+    if remainder:
+        out.append(remainder)
+    assert out == ["Tổng cộng là 19.000 đồng.", "Cảm ơn."]

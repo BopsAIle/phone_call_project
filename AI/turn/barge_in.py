@@ -10,6 +10,7 @@ import time
 from typing import Any, Awaitable, Callable, Protocol
 
 from bridge.protocol import BYTES_PER_SECOND
+from obs.timing import mark_first
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class OutboundGate:
             await self.websocket.send_bytes(pcm)
             if self.first_frame_at is None:
                 self.first_frame_at = time.monotonic()
+                # Khách ngừng nói -> nghe thấy tiếng. Mọi tối ưu khác chỉ là phương tiện.
+                mark_first("first_audio_ms")
             self.bytes_sent += len(pcm)
             self.session.mark_audio_sent()
             return True
@@ -111,12 +114,17 @@ async def abort_and_interrupt(
         )
         await outbound._send_interrupt_locked()
         outbound.reset_playback_clock()
-        session.commit_partial_assistant()
         session.state = "Listening"
 
     result = abort_work()
     if asyncio.iscoroutine(result):
         await result
+    # After abort_work, not inside the lock: a create tool may still be in flight, and
+    # its round has to land in history before the sentence that announced it. Writing
+    # here also puts the transcript in the order the caller actually experienced it.
+    # Safe outside the lock: the generation bump above makes send_audio return early,
+    # so no stale note_spoken can race this.
+    session.commit_partial_assistant()
     return session.generation_id
 
 

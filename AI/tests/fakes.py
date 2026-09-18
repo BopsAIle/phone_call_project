@@ -44,14 +44,21 @@ class FakeSTT:
         self.handler = None
         self.locale: Optional[str] = None
         self.closed = False
+        self.prompt = ""
+        self.keywords: list[str] = []
+        self.context_updates = 0
 
     async def start(self, handler, locale: str | None = None) -> None:
         self.handler = handler
         self.locale = locale
         self.is_ready = True
 
-    async def update_language(self, locale: str) -> None:
-        self.locale = locale
+    async def update_context(self, *, prompt: str = "", keywords: list[str] | None = None) -> None:
+        if prompt:
+            self.prompt = prompt
+        if keywords is not None:
+            self.keywords = list(keywords)
+        self.context_updates += 1
 
     async def append_pcm24(self, pcm: bytes) -> None:
         self.appended.append(pcm)
@@ -190,3 +197,153 @@ class FakeOrderClient:
         if self.order_error:
             return OrderApiResult(ok=False, error=self.order_error)
         return OrderApiResult(ok=True, data=self.order_result)
+
+
+# --- Giả lập OpenAI chat.completions.create (stream) ---------------------------------
+#
+# llm/stream.py trước đây không có test trực tiếp nào, nên các lỗi cắt câu / sổ hội thoại
+# / im lặng đều lọt. Fake này dựng đúng hình dạng chunk mà SDK trả về để test được.
+
+
+class LlmRound:
+    """Một lần gọi chat.completions.create trả về gì.
+
+    text   — model nói ra chữ
+    tools  — model gọi tool: [(call_id, tên, chuỗi JSON tham số)]
+    Model thật hầu như không bao giờ vừa nói vừa gọi tool trong cùng một lượt; để cả hai
+    rỗng là mô phỏng completion rỗng (đường dẫn tới im lặng).
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        tools: list[tuple[str, str, str]] | None = None,
+        finish_reason: str = "stop",
+        token_size: int = 4,
+    ) -> None:
+        self.text = text
+        self.tools = list(tools or [])
+        self.finish_reason = finish_reason
+        self.token_size = max(1, token_size)
+
+    def chunks(self) -> list[object]:
+        from types import SimpleNamespace
+
+        out: list[object] = []
+        for start in range(0, len(self.text), self.token_size):
+            piece = self.text[start : start + self.token_size]
+            out.append(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content=piece, tool_calls=None),
+                            finish_reason=None,
+                        )
+                    ]
+                )
+            )
+        for index, (call_id, name, arguments) in enumerate(self.tools):
+            # Tên tới ở chunk đầu, tham số nhỏ giọt ở các chunk sau — giống SDK thật.
+            out.append(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        index=index,
+                                        id=call_id,
+                                        function=SimpleNamespace(name=name, arguments=""),
+                                    )
+                                ],
+                            ),
+                            finish_reason=None,
+                        )
+                    ]
+                )
+            )
+            for start in range(0, len(arguments), 8):
+                out.append(
+                    SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=index,
+                                            id=None,
+                                            function=SimpleNamespace(
+                                                name=None,
+                                                arguments=arguments[start : start + 8],
+                                            ),
+                                        )
+                                    ],
+                                ),
+                                finish_reason=None,
+                            )
+                        ]
+                    )
+                )
+        out.append(
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=None, tool_calls=None),
+                        finish_reason=self.finish_reason,
+                    )
+                ]
+            )
+        )
+        return out
+
+
+class _FakeStream:
+    def __init__(self, chunks: list[object]) -> None:
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __aiter__(self) -> "_FakeStream":
+        return self
+
+    async def __anext__(self) -> object:
+        if not self._chunks:
+            raise StopAsyncIteration
+        await asyncio.sleep(0)
+        return self._chunks.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeChatCompletions:
+    """Client hình dạng như OpenAI SDK: `client.chat.completions.create(**kwargs)`.
+
+    `rounds` là kịch bản cho từng vòng liên tiếp. Hết kịch bản thì lặp lại vòng cuối,
+    để test được trường hợp model gọi tool mãi không dừng.
+    """
+
+    def __init__(self, rounds: list[LlmRound]) -> None:
+        from types import SimpleNamespace
+
+        self.rounds = list(rounds)
+        self.requests: list[dict] = []
+        self.streams: list[_FakeStream] = []
+        self._index = 0
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    @property
+    def call_count(self) -> int:
+        return len(self.requests)
+
+    async def _create(self, **kwargs) -> _FakeStream:
+        self.requests.append(kwargs)
+        if self._index < len(self.rounds):
+            spec = self.rounds[self._index]
+            self._index += 1
+        else:
+            spec = self.rounds[-1]
+        stream = _FakeStream(spec.chunks())
+        self.streams.append(stream)
+        return stream

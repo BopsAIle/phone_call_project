@@ -5,9 +5,12 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
 from datetime import datetime, timezone as dt_timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol
 from zoneinfo import ZoneInfo
+
+from obs.timing import bump, mark_first, put_value
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +18,32 @@ SENTENCE_ENDS = frozenset(".?!…\n")
 FALLBACK_PHRASES = {
     "en": "Sorry, I didn't catch that. Could you say that again?",
 }
+# Said when the model produced nothing at all. Deliberately not the phrase above: this is
+# our failure, not a mishearing, and blaming the caller makes them repeat themselves into
+# a turn that was never going to work.
+GIVE_UP_PHRASE = "Sorry, I'm having trouble with that right now. Could you say that again?"
 _MAX_TOOL_ROUNDS = 12
 # Barge-in must not skip these: they are the only writes to the restaurant backend.
 _UNINTERRUPTIBLE_TOOLS = frozenset({"create_booking", "create_order"})
+# Chỉ hai tool này đi ra mạng thật; mọi tool khác đọc từ RAM, dưới 1 ms — nói một câu
+# chờ cho việc 1 ms nghe rất thừa.
+_FILLER_TOOLS = frozenset({"create_booking", "create_order"})
+
+
+def pop_customer_response(arguments: str) -> tuple[str, str]:
+    """Tách câu chờ ra khỏi tham số, trả về (câu, tham số còn lại).
+
+    Phải bóc trước khi đưa xuống tool: các hàm execute không biết trường này.
+    JSON hỏng thì trả nguyên si — để lỗi nổi ở chỗ nó vốn nổi.
+    """
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return "", arguments
+    if not isinstance(args, dict) or "customer_response" not in args:
+        return "", arguments
+    spoken = str(args.pop("customer_response") or "").strip()
+    return spoken, json.dumps(args, ensure_ascii=False)
 
 SERVICE_MENU_EN = (
     "To book a table, press 1. "
@@ -94,15 +120,22 @@ def fallback_phrase(locale: str) -> str:
 
 
 def _now_in_zone(timezone: str) -> tuple[str, str]:
+    """Múi giờ và thời điểm hiện tại, làm tròn tới GIỜ — không tới phút.
+
+    Phút trong prompt là thứ giết bộ nhớ đệm của OpenAI: mỗi phút trôi qua là tiền tố
+    request đổi, và ~3.700 token system prompt + mô tả tool bị gửi lại như mới. Việc hiểu
+    "ngày mai" / "tối nay" đã do booking/tools.py xử lý bằng code, prompt không cần biết
+    chính xác tới phút. Tròn giờ thì một cuộc gọi bình thường dùng đúng một tiền tố.
+    """
     tz_name = timezone or "UTC"
     try:
-        now = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M %Z")
-        return tz_name, now
+        now = datetime.now(ZoneInfo(tz_name))
+        return tz_name, now.strftime("%Y-%m-%d (%A) %H:00 %Z")
     except Exception:
         # Windows ships no IANA database, so ZoneInfo("UTC") fails here too when
         # the tzdata package is missing. timezone.utc is stdlib and always works.
         logger.warning("Timezone %r unavailable; using UTC. Is tzdata installed?", timezone)
-        return "UTC", datetime.now(dt_timezone.utc).strftime("%Y-%m-%d %H:%M %Z")
+        return "UTC", datetime.now(dt_timezone.utc).strftime("%Y-%m-%d (%A) %H:00 %Z")
 
 def _catalog_lines(branches: Any) -> str:
     rows = list(branches or [])
@@ -166,11 +199,10 @@ def build_system_prompt(
         f"You are the phone assistant for {name}.",
         "Speak English only. Never speak Vietnamese or any other language.",
         f"The caller's locale code is {lang}; still speak English only.",
-        "The caller may speak Vietnamese. Understand them, but always reply in English.",
         "Speak naturally and briefly.",
         "Do not use markdown. Do not read lists unless the caller needs them read aloud.",
         f"The restaurant timezone is {tz_name} (IANA).",
-        f"The current local time is {now}.",
+        f"Today is {now} (the hour is rounded; do not read the clock out).",
         'Words like "tonight", "tomorrow", and "today" use that timezone, not the server clock. '
         "When the caller says tomorrow, convert it to YYYY-MM-DD for tomorrow in the local time above "
         "and pass it as booking_date. You may also send the word tomorrow; the tool will convert it.",
@@ -318,6 +350,12 @@ def build_system_prompt(
             "Do not say the table is booked, held, or confirmed unless create_booking "
             "returns ok true. If it fails, say so and do not claim success."
         )
+        parts.append(
+            "customer_response on create_booking and create_order is only a holding "
+            "sentence, spoken while the request is still on its way. It must never claim "
+            "success. After the tool returns you must still tell the caller the real "
+            "result in a separate sentence."
+        )
 
     if order_created:
         parts.append(
@@ -337,7 +375,10 @@ def build_system_prompt(
         )
         parts.append(
             "If search_menu returns none, say you do not have that dish and mention nearby names if the tool "
-            "lists candidates. If the result is ambiguous or low confidence, ask which dish they want. "
+            "lists candidates. If the result is ambiguous or low confidence, read the catalog name back and ask "
+            "them to confirm before adding anything, for example: you want the Caesar Salad, is that right. "
+            "If search_menu returns none twice in a row, stop asking them to repeat themselves: call list_menu "
+            "and read a few dish names so they can pick one. "
             "If search_menu or list_menu returns no_branch, ask for the branch then resolve_branch / confirm_branch; "
             "do not invent a menu. After a clear match, call add_to_cart with the menu_item_id from the tool, "
             "the quantity, and an optional line note."
@@ -404,12 +445,50 @@ def split_spoken_sentences(text: str) -> list[str]:
     return sentences
 
 
+# A dot is the only ambiguous terminator: "19.000" and "Mr. Smith" are one sentence,
+# "press 1. To order" is two. Keep these lists short — "st", "co" and "min" would
+# swallow real sentence ends and are not worth the one price readback they rescue.
+_TITLES = frozenset({"mr", "mrs", "ms", "dr", "prof", "jr", "sr", "vs", "etc", "approx"})
+_NUMBER_MARKERS = frozenset({"no", "nr", "apt", "ste", "rm"})
+_WORD_TAIL = re.compile(r"[^\W\d_]+$", re.UNICODE)
+
+
+def is_sentence_boundary(*, punct: str, head: str, gap: str, nxt: str) -> bool:
+    """Does `punct` end a sentence, given what came before, the whitespace after it,
+    and the first non-space character that follows?
+
+    Pure and tiny on purpose: this is the piece worth unit-testing, and the streaming
+    buffer around it should stay dumb.
+    """
+    if punct != ".":
+        return True  # ? ! … \n are never part of a token
+    if nxt in SENTENCE_ENDS:
+        return False  # "..." — still inside the same run of dots
+    if not gap and head[-1:].isdigit() and nxt.isdigit():
+        return False  # 19.000 · 1.5 · $19.99 — a decimal or thousands separator
+    tail = _WORD_TAIL.search(head)
+    if tail is not None:
+        word = tail.group(0)
+        if word.casefold() in _TITLES:
+            return False  # Mr. Smith
+        if word.casefold() in _NUMBER_MARKERS and nxt.isdigit():
+            return False  # No. 106 Hoang Quoc Viet — but "No. I mean yes." still splits
+        if len(word) == 1 and word.isupper():
+            return False  # A. Nguyen
+    return True
+
+
 class SentenceAggregator:
-    """Flush complete clauses at `.` `?` `!` `…` and newlines. Never at commas."""
+    """Flush complete clauses at `.` `?` `!` `…` and newlines. Never at commas.
+
+    Records where the punctuation sat when it armed the lookahead, instead of inferring
+    it from the buffer length later: once whitespace intervenes the buffer no longer
+    says which character armed it, which is how "19.000" used to split in two.
+    """
 
     def __init__(self) -> None:
         self._buf = ""
-        self._needs_lookahead = False
+        self._cut_at = -1  # index just past the armed punctuation, or -1
 
     def push(self, token: str) -> list[str]:
         out: list[str] = []
@@ -423,35 +502,40 @@ class SentenceAggregator:
         return out
 
     def _check(self, char: str) -> str | None:
-        if self._needs_lookahead:
-            if char.strip():
-                self._needs_lookahead = False
-                return self._cut_before_last_char()
+        if self._cut_at >= 0:
+            if not char.strip():
+                return None  # still in the whitespace gap; keep waiting
+            if is_sentence_boundary(
+                punct=self._buf[self._cut_at - 1],
+                head=self._buf[: self._cut_at - 1],
+                gap=self._buf[self._cut_at : -1],
+                nxt=char,
+            ):
+                return self._cut()
+            self._cut_at = -1
+            if char in SENTENCE_ENDS:
+                self._cut_at = len(self._buf)  # "..." — re-arm on this dot instead
             return None
         if self._buf and self._buf[-1] in SENTENCE_ENDS:
-            self._needs_lookahead = True
+            self._cut_at = len(self._buf)
         return None
 
-    def _cut_before_last_char(self) -> str | None:
-        # Buffer is "<sentence><punct><lookahead>". Keep lookahead in the buffer.
-        if len(self._buf) < 2:
-            return None
-        split_at = len(self._buf) - 1
-        while split_at > 0 and self._buf[split_at - 1] in " \t":
-            split_at -= 1
-        sentence = self._buf[:split_at].strip()
-        self._buf = self._buf[split_at:]
+    def _cut(self) -> str | None:
+        # Buffer is "<sentence><punct><gap><lookahead>". Keep gap + lookahead.
+        sentence = self._buf[: self._cut_at].strip()
+        self._buf = self._buf[self._cut_at :]
+        self._cut_at = -1
         return sentence or None
 
     def flush(self) -> str | None:
         text = self._buf.strip()
         self._buf = ""
-        self._needs_lookahead = False
+        self._cut_at = -1
         return text or None
 
     def reset(self) -> None:
         self._buf = ""
-        self._needs_lookahead = False
+        self._cut_at = -1
 
 
 class LlmStreamer(Protocol):
@@ -483,6 +567,21 @@ def _accumulate_tool_call(bucket: dict[int, dict[str, str]], part: Any) -> None:
         slot["arguments"] += str(arguments)
 
 
+def _note_usage(chunk: Any) -> None:
+    """Chunk usage về cuối stream với choices rỗng. cached_tokens là cách duy nhất
+    biết bộ nhớ đệm prompt của OpenAI có trúng hay không."""
+    usage = getattr(chunk, "usage", None)
+    if usage is None:
+        return
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    if prompt_tokens is not None:
+        put_value("prompt_tokens", prompt_tokens)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    if cached is not None:
+        put_value("cached_tokens", cached)
+
+
 async def _run_tool(
     execute_tool: Callable[[str, str], Awaitable[str] | str],
     name: str,
@@ -506,21 +605,41 @@ class OpenAiLlm:
         *,
         tools: Optional[list[dict[str, Any]]] = None,
         execute_tool: Optional[Callable[[str, str], Awaitable[str] | str]] = None,
+        on_tool_round: Optional[Callable[[list[dict[str, Any]]], None]] = None,
     ) -> AsyncIterator[str]:
+        # Shallow copy, deliberately: this generator must not own the caller's history.
+        # It used to append straight into session.history across await points, so barge-in
+        # could land an assistant message between a tool_calls message and its replies —
+        # which the API rejects for the rest of the call. working[0] is still the same
+        # dict object, so refresh_system_prompt()'s in-place edit mid-turn still lands.
+        working = list(messages)
+        spoke = False
+
+        def commit(group: list[dict[str, Any]]) -> None:
+            """One synchronous hand-off. Nothing can interleave inside it."""
+            working.extend(group)
+            if on_tool_round is not None:
+                on_tool_round(group)
+
         for _round in range(_MAX_TOOL_ROUNDS):
             if should_abort():
                 return
             kwargs: dict[str, Any] = {
                 "model": self._model,
-                "messages": messages,
+                "messages": working,
                 "stream": True,
                 "temperature": 0.7,
                 # A readback plus a create_* tool call has to fit here; truncation drops the call.
                 "max_tokens": 700,
+                # Chunk usage cuối stream mang cached_tokens — cách duy nhất biết bộ
+                # nhớ đệm prompt có trúng không. Chunk này có choices rỗng, vòng lặp
+                # dưới đã bỏ qua sẵn.
+                "stream_options": {"include_usage": True},
             }
             if tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
+            bump("llm_rounds")
             stream = await self._client.chat.completions.create(**kwargs)
             aggregator = SentenceAggregator()
             tool_calls: dict[int, dict[str, str]] = {}
@@ -529,6 +648,7 @@ class OpenAiLlm:
                 async for chunk in stream:
                     if should_abort():
                         return
+                    _note_usage(chunk)
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
                     if choice is None:
                         continue
@@ -537,14 +657,20 @@ class OpenAiLlm:
                     if delta is None:
                         continue
                     content = getattr(delta, "content", None) or ""
+                    if content:
+                        mark_first("llm_ttft_ms")
                     for sentence in aggregator.push(content):
                         if should_abort():
                             return
+                        spoke = True
+                        mark_first("llm_ttfs_ms")
                         yield sentence
                     for part in getattr(delta, "tool_calls", None) or []:
+                        mark_first("llm_ttft_ms")
                         _accumulate_tool_call(tool_calls, part)
                 remainder = aggregator.flush()
                 if remainder and not should_abort() and not tool_calls:
+                    spoke = True
                     yield remainder
             finally:
                 close = getattr(stream, "close", None)
@@ -557,28 +683,50 @@ class OpenAiLlm:
 
             ordered = [tool_calls[i] for i in sorted(tool_calls) if tool_calls[i].get("name")]
             if not ordered or execute_tool is None:
+                # Nothing to say and nothing to run: an empty completion, or tool deltas
+                # with no usable name. Silence is the worst outcome on a phone call, so
+                # say something rather than hanging up on the caller mid-turn.
+                if not spoke and not should_abort():
+                    logger.warning("Turn produced no speech and no tool call; using fallback")
+                    yield GIVE_UP_PHRASE
                 return
 
             assistant_tools = []
+            fillers: dict[str, str] = {}
             for slot in ordered:
+                call_id = slot["id"] or f"call_{len(assistant_tools)}"
+                arguments = slot["arguments"] or "{}"
+                if slot["name"] in _FILLER_TOOLS:
+                    # Bóc ở chỗ dựng assistant_tools, để lịch sử ghi đúng tham số đã chạy
+                    # và tool không nhận một trường lạ.
+                    spoken, arguments = pop_customer_response(arguments)
+                    if spoken:
+                        fillers[call_id] = spoken
                 assistant_tools.append(
                     {
-                        "id": slot["id"] or f"call_{len(assistant_tools)}",
+                        "id": call_id,
                         "type": "function",
-                        "function": {
-                            "name": slot["name"],
-                            "arguments": slot["arguments"] or "{}",
-                        },
+                        "function": {"name": slot["name"], "arguments": arguments},
                     }
                 )
-            messages.append({"role": "assistant", "content": None, "tool_calls": assistant_tools})
-            # Every tool_call in that assistant message needs a matching tool message, or the
-            # next request is rejected and the rest of the call can never use a tool again.
+            # Build the whole round locally and hand it over in one synchronous commit.
+            # Every tool_call needs a matching tool message *immediately* after the
+            # assistant message, or the next request is rejected and the rest of the call
+            # can never use a tool again.
             # BaseException covers CancelledError: barge-in cancels this task mid-tool.
+            group: list[dict[str, Any]] = [
+                {"role": "assistant", "content": None, "tool_calls": assistant_tools}
+            ]
             answered: set[str] = set()
             try:
                 for call in assistant_tools:
                     fn = call["function"]
+                    # Nói TRƯỚC khi gửi đi. TurnPlayer.speak_sentence tạo task TTS rồi
+                    # trả về ngay, nên tiếng và HTTP chạy song song mà không cần gather.
+                    spoken = fillers.get(call["id"])
+                    if spoken and not should_abort():
+                        spoke = True
+                        yield spoken
                     if should_abort() and fn["name"] not in _UNINTERRUPTIBLE_TOOLS:
                         payload = json.dumps({"ok": False, "error": "interrupted"})
                     else:
@@ -589,7 +737,7 @@ class OpenAiLlm:
                             logger.exception("Tool %s failed", fn["name"])
                             payload = json.dumps({"ok": False, "error": "tool_failed"})
                         logger.info("Tool result %s -> %s", fn["name"], payload)
-                    messages.append(
+                    group.append(
                         {
                             "role": "tool",
                             "tool_call_id": call["id"],
@@ -600,14 +748,19 @@ class OpenAiLlm:
             except BaseException:
                 for call in assistant_tools:
                     if call["id"] not in answered:
-                        messages.append(
+                        group.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": call["id"],
                                 "content": json.dumps({"ok": False, "error": "interrupted"}),
                             }
                         )
+                # Commit even while unwinding: a half-written round is what breaks the call.
+                commit(group)
                 raise
+            commit(group)
             if should_abort():
                 return
-        logger.warning("Hit max tool rounds (%s); stopping without speech", _MAX_TOOL_ROUNDS)
+        logger.warning("Hit max tool rounds (%s); using fallback", _MAX_TOOL_ROUNDS)
+        if not spoke and not should_abort():
+            yield GIVE_UP_PHRASE
