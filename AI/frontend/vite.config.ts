@@ -8,8 +8,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      "/v1/bridge": { target: "http://127.0.0.1:8080", ws: true },
-      "/health": { target: "http://127.0.0.1:8080" },
+      "/v1/bridge": { target: "http://127.0.0.1:8071", ws: true },
+      "/health": { target: "http://127.0.0.1:8071" },
     },
   },
 });

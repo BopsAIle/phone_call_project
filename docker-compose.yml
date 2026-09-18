@@ -47,7 +47,7 @@ services:
     # Tunnel tới AI Bridge chạy trên máy host (AI/.env: AI_BRIDGE_HOST=0.0.0.0)
     command:
       - http
-      - host.docker.internal:${AI_BRIDGE_PORT:-8080}
+      - host.docker.internal:${AI_BRIDGE_PORT:-8071}
       - --url=https://${NGROK_DOMAIN:-}
       - --log=stdout
     ports:

@@ -76,7 +76,7 @@ GET    /menu/order/{bookingId}/items   # Chi tiết order items
 
 ### 1. Tạo Menu Items
 ```bash
-curl -X POST http://localhost:8080/menu \
+curl -X POST http://localhost:8070/menu \
   -H "Content-Type: application/json" \
   -d '{
     "branch_id": "branch-uuid",
@@ -90,7 +90,7 @@ curl -X POST http://localhost:8080/menu \
 
 ### 2. Khách gọi đặt hàng mang về
 ```bash
-curl -X POST http://localhost:8080/menu/takeout/ai \
+curl -X POST http://localhost:8070/menu/takeout/ai \
   -H "Content-Type: application/json" \
   -d '{
     "restaurant_id": "rest-uuid",
@@ -115,7 +115,7 @@ curl -X POST http://localhost:8080/menu/takeout/ai \
 
 ### 3. Lấy chi tiết order
 ```bash
-curl http://localhost:8080/menu/order/{bookingId}/items
+curl http://localhost:8070/menu/order/{bookingId}/items
 ```
 
 ---

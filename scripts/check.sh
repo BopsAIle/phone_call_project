@@ -9,9 +9,13 @@ probe() { # name url
   else printf '  FAIL %-8s %s (http %s)\n' "$1" "$2" "${code:-000}"; fi
 }
 ai_port=${AI_BRIDGE_PORT:-$(grep -E '^AI_BRIDGE_PORT=' AI/.env 2>/dev/null | cut -d= -f2)}
-probe BE    http://127.0.0.1:3001/api-docs
-probe FE    http://localhost:3000/
-probe AI    "http://127.0.0.1:${ai_port:-8080}/health"
+# Cổng BE đọc từ BE/.env để không lệch khi đổi cổng (mặc định 8070)
+be_port=${BE_PORT:-$(grep -E '^PORT=' BE/.env 2>/dev/null | cut -d= -f2)}
+probe BE    "http://127.0.0.1:${be_port:-8070}/api-docs"
+# Cổng FE đọc từ vite.config.ts để không lệch khi đổi cổng (mặc định 3070)
+fe_port=${FE_PORT:-$(grep -oE 'port:[[:space:]]*[0-9]+' FE/vite.config.ts 2>/dev/null | head -1 | grep -oE '[0-9]+')}
+probe FE    "http://localhost:${fe_port:-3070}/"
+probe AI    "http://127.0.0.1:${ai_port:-8071}/health"
 
 # ngrok: hỏi inspector trong container lấy public URL rồi gọi /health qua đó
 public=$(curl -s --max-time 3 http://127.0.0.1:4040/api/tunnels 2>/dev/null | sed -E 's/.*"public_url":"(https:[^"]+)".*/\1/')

@@ -30,7 +30,7 @@ fi
 # Biến cho compose: .env ở root (ngrok), phần còn lại suy ra từ AI/.env
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 export AI_BRIDGE_PORT="${AI_BRIDGE_PORT:-$(grep -E '^AI_BRIDGE_PORT=' AI/.env 2>/dev/null | cut -d= -f2)}"
-export AI_BRIDGE_PORT="${AI_BRIDGE_PORT:-8080}"
+export AI_BRIDGE_PORT="${AI_BRIDGE_PORT:-8071}"
 export NGROK_DOMAIN="${NGROK_DOMAIN:-$(grep -E '^TELNYX_STREAM_URL=' AI/.env 2>/dev/null | sed -E 's#^[^=]*=wss?://([^/]+).*#\1#')}"
 
 profile=()

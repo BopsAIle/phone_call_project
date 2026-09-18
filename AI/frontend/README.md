@@ -29,7 +29,7 @@ copy .env.example .env
 python app.py
 ```
 
-Health: `http://127.0.0.1:8080/health`
+Health: `http://127.0.0.1:8071/health`
 
 ### 2. UI thu âm (folder này)
 
@@ -38,7 +38,7 @@ cd frontend
 copy .env.example .env
 ```
 
-Trong `frontend/.env`, đặt `VITE_AI_BRIDGE_TOKEN` **trùng** `AI_BRIDGE_TOKEN` của server. URL mặc định: `ws://127.0.0.1:8080/v1/bridge`.
+Trong `frontend/.env`, đặt `VITE_AI_BRIDGE_TOKEN` **trùng** `AI_BRIDGE_TOKEN` của server. URL mặc định: `ws://127.0.0.1:8071/v1/bridge`.
 
 ```bash
 npm install
@@ -79,7 +79,7 @@ frontend/
 `-- vite.config.ts     # Proxy /v1/bridge và /health (tuỳ chọn)
 ```
 
-Có thể để URL là `/v1/bridge` để đi qua proxy Vite thay vì nối thẳng cổng 8080.
+Có thể để URL là `/v1/bridge` để đi qua proxy Vite thay vì nối thẳng cổng 8071.
 
 ## Phạm vi
 

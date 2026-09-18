@@ -194,7 +194,7 @@ Phần này viết lại cho đủ, để khi code v2 không ai vô tình phá n
 
 ### 3.1 Handshake và auth
 
-Endpoint: `ws://<host>:8080/v1/bridge` (local) hoặc `wss://<host>/v1/bridge` (deploy).
+Endpoint: `ws://<host>:8071/v1/bridge` (local) hoặc `wss://<host>/v1/bridge` (deploy).
 
 ```27:34:bridge/server.py
 def _bearer_authorized(websocket: WebSocket, token: str) -> bool:

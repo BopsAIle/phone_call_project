@@ -19,7 +19,7 @@ type Settings = {
 };
 
 const DEFAULTS: Settings = {
-  wsUrl: import.meta.env.VITE_AI_BRIDGE_URL || "ws://127.0.0.1:8080/v1/bridge",
+  wsUrl: import.meta.env.VITE_AI_BRIDGE_URL || "ws://127.0.0.1:8071/v1/bridge",
   token: import.meta.env.VITE_AI_BRIDGE_TOKEN || "",
   storeName: "Bella Vista",
   toNumber: "1900636886",

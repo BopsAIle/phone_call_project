@@ -16,14 +16,16 @@ Tài liệu này giả định mọi thứ **đã cấu hình xong** và chỉ c
 | Số Telnyx | `+1 773 302 2476` |
 | Hotline trong DB | `17733022476` (chỉ chữ số, có mã quốc gia `1`) |
 | Call Control App | `AI Bridge Dev`, Webhook **API v2** |
-| Webhook URL | `https://caregiver-trustable-speech.ngrok-free.dev/telnyx/webhook` |
-| Stream URL | `wss://caregiver-trustable-speech.ngrok-free.dev/telnyx/media` |
+| Webhook URL | `https://aiapi.jupiter-ai.pro/telnyx/webhook` |
+| Stream URL | `wss://aiapi.jupiter-ai.pro/telnyx/media` |
 | SIP connection | `Forward Only`, user `4mgtb3k0duz6` |
 | Database | `restaurant_ai` trong container `ai_receptionist_db`, user `receptionist` |
 
-Domain ngrok là **static** (`ngrok-free.dev`) nên không đổi giữa các lần chạy. Nếu
-vì lý do nào đó phải đổi domain, sửa **cả hai** chỗ: `TELNYX_STREAM_URL` trong
-`.env` và Webhook URL trên portal Telnyx.
+`aiapi.jupiter-ai.pro` là tunnel trỏ về **chính máy dev này**, cổng `127.0.0.1:8071`
+(khớp `AI_BRIDGE_PORT` trong `AI/.env`). Vì vậy webhook và stream chỉ chạy khi máy bật
+và tunnel còn sống; đổi cổng AI thì phải sửa cổng đích của tunnel cho khớp.
+Ngrok (`ngrok http 8071`) chỉ còn là phương án dự phòng — nếu dùng thì phải sửa **cả hai**
+chỗ: `TELNYX_STREAM_URL` trong `.env` và Webhook URL trên portal Telnyx.
 
 ---
 
@@ -50,7 +52,7 @@ cd D:\phonecall\restaurant-backend
 npm run start:dev
 ```
 
-Chờ dòng `Ứng dụng đang chạy tại: http://localhost:3001`.
+Chờ dòng `Ứng dụng đang chạy tại: http://localhost:8070`.
 
 ### 3. React dashboard
 
@@ -59,13 +61,23 @@ cd D:\phonecall\restaurant-frontend
 npm run dev
 ```
 
-### 4. ngrok
+### 4. Đường ra internet (tunnel)
 
-```powershell
-ngrok http 8080
+Cấu hình đang dùng: `aiapi.jupiter-ai.pro` → `127.0.0.1:8071` (không cần chạy gì thêm trên
+máy). Kiểm tra tunnel sống:
+
+```bash
+curl -s https://aiapi.jupiter-ai.pro/health
 ```
 
-Phải thấy `https://caregiver-trustable-speech.ngrok-free.dev -> http://localhost:8080`.
+Phương án dự phòng (nếu phải dùng ngrok):
+
+```powershell
+ngrok http 8071
+```
+
+Phải thấy `https://caregiver-trustable-speech.ngrok-free.dev -> http://localhost:8071`,
+rồi đổi `TELNYX_STREAM_URL` trong `.env` và Webhook URL trên portal Telnyx cho khớp.
 
 ### 5. AI Bridge
 
@@ -82,9 +94,9 @@ python app.py
 ## Kiểm tra trước khi gọi
 
 ```powershell
-curl http://127.0.0.1:3001/restaurants/by-hotline/17733022476
-curl http://127.0.0.1:8080/health
-curl https://caregiver-trustable-speech.ngrok-free.dev/health
+curl http://127.0.0.1:8070/restaurants/by-hotline/17733022476
+curl http://127.0.0.1:8071/health
+curl https://aiapi.jupiter-ai.pro/health
 ```
 
 Ba dòng log bắt buộc phải có khi `app.py` khởi động:
@@ -106,7 +118,7 @@ Application startup complete.
 Nếu vừa sửa dữ liệu nhà hàng trên dashboard, ép bridge nạp lại thay vì chờ 300 giây:
 
 ```powershell
-curl -X POST http://127.0.0.1:8080/internal/sync/refresh -H "Authorization: Bearer <AI_BRIDGE_TOKEN>"
+curl -X POST http://127.0.0.1:8071/internal/sync/refresh -H "Authorization: Bearer <AI_BRIDGE_TOKEN>"
 ```
 
 ---
@@ -216,6 +228,6 @@ Tắt container không mất dữ liệu. Data chỉ mất khi xóa volume
 Nếu Ctrl+C không dứt điểm (tiến trình `nest start --watch` hay chiếm lại cổng):
 
 ```powershell
-netstat -ano | findstr ":3001 :3000 :8080"
+netstat -ano | findstr ":8070 :3070 :8071"
 taskkill /PID <pid> /T /F
 ```

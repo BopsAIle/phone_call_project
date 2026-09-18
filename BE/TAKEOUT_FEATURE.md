@@ -361,7 +361,7 @@ npm run typeorm migration:revert
 
 ### 1. Tạo menu items
 ```bash
-curl -X POST http://localhost:8080/menu \
+curl -X POST http://localhost:8070/menu \
   -H "Content-Type: application/json" \
   -d '{
     "branch_id": "branch-uuid",
@@ -374,12 +374,12 @@ curl -X POST http://localhost:8080/menu \
 
 ### 2. Lấy menu
 ```bash
-curl http://localhost:8080/menu/branch/{branchId}
+curl http://localhost:8070/menu/branch/{branchId}
 ```
 
 ### 3. Tạo takeout booking
 ```bash
-curl -X POST http://localhost:8080/menu/takeout/ai \
+curl -X POST http://localhost:8070/menu/takeout/ai \
   -H "Content-Type: application/json" \
   -d '{
     "restaurant_id": "rest-uuid",
@@ -398,7 +398,7 @@ curl -X POST http://localhost:8080/menu/takeout/ai \
 
 ### 4. Lấy order items
 ```bash
-curl http://localhost:8080/menu/order/{bookingId}/items
+curl http://localhost:8070/menu/order/{bookingId}/items
 ```
 
 ---

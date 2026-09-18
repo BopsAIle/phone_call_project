@@ -51,9 +51,15 @@ wait_port() { # host port timeout_s label
 
 # Cổng phải rảnh trước khi chạy, tránh nest/vite/uvicorn tự nhảy sang cổng khác hoặc chết im.
 AI_PORT=${AI_BRIDGE_PORT:-$(grep -E '^AI_BRIDGE_PORT=' AI/.env 2>/dev/null | cut -d= -f2)}
-AI_PORT=${AI_PORT:-8080}
+AI_PORT=${AI_PORT:-8071}
 busy=0
-for p in 3000 3001 "$AI_PORT"; do
+# Cổng FE đọc từ vite.config.ts để không lệch khi đổi cổng (mặc định 3070)
+FE_PORT=${FE_PORT:-$(grep -oE 'port:[[:space:]]*[0-9]+' FE/vite.config.ts 2>/dev/null | head -1 | grep -oE '[0-9]+')}
+FE_PORT=${FE_PORT:-3070}
+# Cổng BE đọc từ BE/.env để không lệch khi đổi cổng (mặc định 8070)
+BE_PORT=${BE_PORT:-$(grep -E '^PORT=' BE/.env 2>/dev/null | cut -d= -f2)}
+BE_PORT=${BE_PORT:-8070}
+for p in "$FE_PORT" "$BE_PORT" "$AI_PORT"; do
   pid=$(lsof -nP -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null | head -1)
   if [ -n "$pid" ]; then
     echo "!! cổng $p đang bị chiếm bởi pid $pid: $(ps -p "$pid" -o command= | cut -c1-80)"
@@ -71,12 +77,12 @@ NGROK_DOMAIN=$(grep -E '^NGROK_DOMAIN=' .env 2>/dev/null | cut -d= -f2)
 NGROK_DOMAIN=${NGROK_DOMAIN:-$(grep -E '^TELNYX_STREAM_URL=' AI/.env 2>/dev/null | sed -E 's#^[^=]*=wss?://([^/]+).*#\1#')}
 
 # AI chạy SAU BE để sync catalog ngay lúc khởi động (AI/RUNBOOK.md)
-wait_port 127.0.0.1 3001 90 "NestJS BE" || true
+wait_port 127.0.0.1 "$BE_PORT" 90 "NestJS BE" || true
 run AI  "1;32" AI "$ROOT/AI/.venv/bin/python" app.py
 
 echo
-echo ">> Dashboard  http://localhost:3000"
-echo ">> Swagger    http://localhost:3001/api-docs"
+echo ">> Dashboard  http://localhost:$FE_PORT"
+echo ">> Swagger    http://localhost:$BE_PORT/api-docs"
 echo ">> AI health  http://127.0.0.1:$AI_PORT/health"
 if [ "$NGROK_UP" = 1 ]; then
   echo ">> ngrok      https://$NGROK_DOMAIN/health   (inspector: http://localhost:4040)"

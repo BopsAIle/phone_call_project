@@ -9,25 +9,26 @@ Hai nhánh này **không nằm trong thư mục AI Bridge**. Chúng được che
 | API NestJS (thay Render) | `mhoan` | `D:\phonecall\restaurant-backend` |
 | Dashboard React | `feature/react-frontend` | `D:\phonecall\restaurant-frontend` |
 
-AI Bridge (repo này) gọi API local qua `RESTAURANT_API_BASE=http://127.0.0.1:3001`.
+AI Bridge (repo này) gọi API local qua `RESTAURANT_API_BASE=http://127.0.0.1:8070`.
 
 ```
-Trình duyệt dashboard  -->  React :3000  -->  NestJS :3001  -->  Postgres Docker :5433
-AI Bridge (Python :8080)  ---------------------------------^
+Trình duyệt dashboard  -->  React :3070  -->  NestJS :8070  -->  Postgres Docker :5433
+AI Bridge (Python :8071)  ---------------------------------^
         |
         +--> Redis Docker :6379 (cache catalog)
 ```
 
 | Dịch vụ | Cổng | URL |
 | --- | --- | --- |
-| React dashboard | 3000 | http://localhost:3000 |
-| NestJS API | 3001 | http://localhost:3001 |
-| Swagger | 3001 | http://localhost:3001/api-docs |
+| React dashboard | 3070 | http://localhost:3070 |
+| NestJS API | 8070 | http://localhost:8070 |
+| Swagger | 8070 | http://localhost:8070/api-docs |
 | PostgreSQL | 5433 | `localhost:5433` (trong container là 5432) |
 | Redis | 6379 | `redis://127.0.0.1:6379/0` |
-| AI Bridge | 8080 | `ws://127.0.0.1:8080/v1/bridge` |
+| AI Bridge | 8071 | `ws://127.0.0.1:8071/v1/bridge` |
 
-Cổng **3001** (API) tách khỏi **8080** (AI Bridge) để chạy cùng lúc. Cổng **5433** tránh đụng Postgres khác đang chiếm 5432.
+Cổng **8070** (API) tách khỏi **8071** (AI Bridge) để chạy cùng lúc. Cổng **5433** tránh đụng Postgres khác đang chiếm 5432.
+FE **3070** → NestJS **8070** → Postgres **5433**, AI Bridge **8071**. `strictPort: true` trong `FE/vite.config.ts` giữ Vite không tự nhảy cổng sang cổng của BE.
 
 ---
 
@@ -123,7 +124,7 @@ npm install
 `.env` backend phải là:
 
 ```
-PORT=3001
+PORT=8070
 DB_HOST=127.0.0.1
 DB_PORT=5433
 DB_USERNAME=receptionist
@@ -137,7 +138,7 @@ DB_SSL=false
 Frontend cần file `.env`:
 
 ```
-VITE_API_URL=http://localhost:3001
+VITE_API_URL=http://localhost:8070
 ```
 
 ---
@@ -177,7 +178,7 @@ cd D:\phonecall\restaurant-backend
 npm run start:dev
 ```
 
-Log thành công: `Ứng dụng đang chạy tại: http://localhost:3001`.
+Log thành công: `Ứng dụng đang chạy tại: http://localhost:8070`.
 
 ### 3. React dashboard
 
@@ -186,14 +187,14 @@ cd D:\phonecall\restaurant-frontend
 npm run dev
 ```
 
-Mở http://localhost:3000.
+Mở http://localhost:3070.
 
 ### 4. (Tuỳ chọn) AI Bridge
 
 Trong `phone_call_project/.env` phải có:
 
 ```
-RESTAURANT_API_BASE=http://127.0.0.1:3001
+RESTAURANT_API_BASE=http://127.0.0.1:8070
 REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
@@ -206,7 +207,7 @@ python app.py
 Kiểm tra AI Bridge đã nối được backend:
 
 ```powershell
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8071/health
 ```
 
 Mong đợi `"cache": {"enabled": true, "ready": true, "degraded": false}` kèm số `restaurants` / `hotlines` khớp dữ liệu trên dashboard. Nếu thấy `"enabled": false` thì Redis chưa chạy; nếu `ready: false` thì NestJS chưa chạy hoặc sai `RESTAURANT_API_BASE`.
@@ -235,7 +236,7 @@ Bật lại: `docker start ai_receptionist_db`.
 | `ECONNREFUSED` cổng 5433 | `docker start ai_receptionist_db` (đừng dùng `docker compose`, container này mồ côi) |
 | Cổng 5433 vẫn LISTENING nhưng không kết nối được | Binding "ma" của Docker Desktop còn sót sau khi container chết. Kiểm tra bằng `docker ps`, đừng tin `netstat`. |
 | API fail vì SSL | `DB_SSL=false` trong `.env` backend |
-| Cổng 3000/3001 đã chiếm | Đóng process cũ, hoặc đổi `PORT` / Vite `port` rồi sửa `VITE_API_URL` |
+| Cổng 8070/3070 đã chiếm | Đóng process cũ (Ctrl+C), hoặc đổi `PORT` / Vite `port` rồi sửa `VITE_API_URL` và `CORS_ORIGIN` |
 | Dashboard trống | DB mới; tạo restaurant trên UI |
 | AI Bridge không đặt bàn / đặt món | API chưa chạy, hoặc hotline không khớp nhà hàng trong DB |
 | AI Bridge log traceback Redis lúc khởi động | Chỉ là cảnh báo. Chạy `docker start aibridge-redis` nếu muốn có cache. |

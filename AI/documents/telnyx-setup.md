@@ -211,13 +211,13 @@ Telnyx không gọi được vào `localhost`, và bắt buộc TLS hợp lệ. 
 địa chỉ công khai.
 
 ```bash
-ngrok http 8080
+ngrok http 8071
 ```
 
 Ngrok in ra một dòng kiểu:
 
 ```
-Forwarding   https://a1b2-c3d4.ngrok-free.app -> http://localhost:8080
+Forwarding   https://a1b2-c3d4.ngrok-free.app -> http://localhost:8071
 ```
 
 Lấy domain đó dùng cho hai chỗ, **khác giao thức**:
@@ -273,10 +273,10 @@ Ba cửa sổ terminal:
 python app.py
 
 # 2 — duong ra internet
-ngrok http 8080
+ngrok http 8071
 
 # 3 — kiem tra server song
-curl http://localhost:8080/health
+curl http://localhost:8071/health
 ```
 
 Khi khởi động, log phải có dòng:
