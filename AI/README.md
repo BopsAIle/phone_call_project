@@ -51,7 +51,7 @@ Wire trên socket chỉ có hai loại frame:
 | AI -> Backend | Binary | Audio agent, cùng định dạng |
 | AI -> Backend | Text | `{"event":"interrupt"}` khi barge-in |
 
-Auth: Bearer token lúc handshake. Endpoint: `ws://<host>:8080/v1/bridge` (local) / `wss://<host>/v1/bridge` (deploy).
+Auth: Bearer token lúc handshake. Endpoint: `ws://<host>:8071/v1/bridge` (local) / `wss://<host>/v1/bridge` (deploy).
 
 Chi tiết state machine, resample, và thứ tự barge-in: [documents/ai-pipeline.md](documents/ai-pipeline.md).
 
@@ -92,6 +92,8 @@ phone_call_project/
 |
 |-- booking/               # Dat ban: resolve_branch, create_booking
 |-- order/                 # Dat mon: menu, gio hang, create_order
+|-- calls/                 # Luu thong tin cuoc goi + transcript len BE
+|-- obs/                   # Do do tre tung chang (mot dong TURN moi luot)
 |
 |-- tests/                 # Unit + WS tests voi fake STT/LLM/TTS
 |
@@ -114,6 +116,10 @@ phone_call_project/
 | `telephony/telnyx/` | Adapter Telnyx: webhook Call Control + media stream → CallPipeline |
 | `booking/` | Tool đặt bàn + HTTP booking |
 | `order/` | Tool giỏ hàng / đơn ship-mang về + HTTP menu/orders |
+| `calls/` | Gom transcript trong RAM, đẩy lên BE theo lô; lỗi không bao giờ làm hỏng cuộc gọi |
+| `obs/timing.py` | Đồng hồ mỗi lượt nói; `scripts/turn_stats.py` tổng hợp ra p50/p90/p95 |
+| `audio/recorder.py` | Ghi âm tiếng người gọi để dựng bộ đo STT (mặc định TẮT) |
+| `llm/history.py` | Giữ sổ hội thoại đúng hình dạng API chấp nhận; tự chữa nếu lệch |
 
 ---
 
@@ -148,7 +154,7 @@ cp .env.example .env
 | `OPENAI_API_KEY` | Key OpenAI - thiếu thì STT/LLM/TTS fail trên cuộc gọi thật |
 | `AI_BRIDGE_TOKEN` | Bearer token backend phải gửi lúc handshake - trống thì mọi kết nối bị từ chối |
 
-Tùy chọn: `OPENAI_MODEL`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL` (mặc định `tts-1`; `tts-1-hd` nếu cần chất hơn), `OPENAI_TTS_VOICE`, `TTS_CHUNK_BYTES` (mặc định `1024`), `AI_BRIDGE_HOST` (mặc định `0.0.0.0`), `AI_BRIDGE_PORT` (mặc định `8080`), `LOG_LEVEL`, `RESTAURANT_API_BASE` (mặc định `http://127.0.0.1:3001` — NestJS local, đặt bàn / đặt món).
+Tùy chọn: `OPENAI_MODEL`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL` (mặc định `tts-1`; `tts-1-hd` nếu cần chất hơn), `OPENAI_TTS_VOICE`, `TTS_CHUNK_BYTES` (mặc định `1024`), `AI_BRIDGE_HOST` (mặc định `0.0.0.0`), `AI_BRIDGE_PORT` (mặc định `8071`), `LOG_LEVEL`, `RESTAURANT_API_BASE` (mặc định `http://127.0.0.1:8070` — NestJS local, đặt bàn / đặt món).
 
 ### 3. Chạy server
 
@@ -159,16 +165,16 @@ python app.py
 Hoặc:
 
 ```bash
-uvicorn app:app --host 0.0.0.0 --port 8080
+uvicorn app:app --host 0.0.0.0 --port 8071
 ```
 
-- Health: `GET http://localhost:8080/health` -> `{"status":"ok"}`
-- Bridge: `ws://localhost:8080/v1/bridge` với header `Authorization: Bearer <AI_BRIDGE_TOKEN>`
+- Health: `GET http://localhost:8071/health` -> `{"status":"ok"}`
+- Bridge: `ws://localhost:8071/v1/bridge` với header `Authorization: Bearer <AI_BRIDGE_TOKEN>`
 
 Backend điện thoại (`phone_call_project_viet`) gọi tới socket này. Trong `.env` của backend:
 
 ```ini
-AI_BRIDGE_URL=ws://127.0.0.1:8080/v1/bridge
+AI_BRIDGE_URL=ws://127.0.0.1:8071/v1/bridge
 AI_BRIDGE_TOKEN=<trùng AI_BRIDGE_TOKEN của repo này>
 ```
 
@@ -207,3 +213,64 @@ npm run dev
 ```
 
 Chi tiết: [frontend/README.md](frontend/README.md). Trình duyệt gửi token bằng `?token=` vì WebSocket trên browser không gắn được header `Authorization`.
+
+---
+
+## Đo độ trễ
+
+Mỗi lượt nói ghi một dòng `TURN` ở mức INFO:
+
+```
+TURN call=abc123 gen=7 stt_ms=812 llm_ttft_ms=430 llm_ttfs_ms=512 tts_ttfb_ms=190
+     first_audio_ms=1104 llm_rounds=2 tool_ms=640 tools=search_menu,add_to_cart
+     cached_tokens=3584 prompt_tokens=4102
+```
+
+Con số đáng nhìn trước tiên là **`first_audio_ms`** — từ lúc khách ngừng nói đến lúc nghe thấy tiếng.
+Mọi chỉ số khác chỉ giải thích vì sao nó lớn.
+
+```bash
+.venv/bin/python app.py 2>&1 | tee app.log
+.venv/bin/python scripts/turn_stats.py app.log              # p50 / p90 / p95 từng chặng
+.venv/bin/python scripts/turn_stats.py app.log --call abc123 # chi tiết từng lượt
+```
+
+`cached_tokens = 0` ở mọi lượt nghĩa là bộ nhớ đệm prompt của OpenAI không trúng lần nào.
+
+## Dựng bộ dữ liệu đo STT
+
+`scripts/stt_eval.py` đã sẵn sàng nhưng cần audio thật. Bật ghi âm để gom:
+
+```bash
+CALL_RECORD_DIR=audio/recordings .venv/bin/python app.py    # mặc định TẮT
+```
+
+Khi bật, lời chào **tự thêm câu thông báo ghi âm** cho người gọi. File ghi âm nằm trong
+`.gitignore` — đừng gỡ ra.
+
+```bash
+.venv/bin/python scripts/split_call.py audio/recordings/<tên>.wav
+# nghe lại, sửa các file .txt.auto cho đúng, đổi đuôi thành .txt
+.venv/bin/python scripts/stt_eval.py --prompt "$(...)"      # xem stt/context.build_prompt
+```
+
+Chỉ đoạn nào có `.txt` (do người xác nhận) mới vào bộ đo. Theo playbook §7.4: **ưu tiên tỉ lệ
+nghe đúng tên món hơn tỉ lệ lỗi chữ tổng thể**, và luôn xem kèm tỉ lệ nhận nhầm.
+
+## Lưu trữ cuộc gọi
+
+`CALL_LOG_ENABLED=true` (mặc định) đẩy thông tin cuộc gọi và transcript lên BE:
+
+| Endpoint | Lúc nào |
+| --- | --- |
+| `POST /calls/ai/start` | đầu cuộc gọi, sau khi tra được nhà hàng — idempotent theo `call_id` |
+| `POST /calls/ai/{id}/messages` | theo lô trong lúc gọi (10 lượt hoặc 30 giây) |
+| `POST /calls/ai/{id}/end` | lúc cúp máy, kèm lô còn lại |
+| `GET /calls/{id}` | đọc lại kèm transcript — dùng khi khách khiếu nại đơn |
+
+Transcript lấy từ thứ **hai bên thật sự đã nghe**, không phải `session.history`: câu AI chỉ được
+ghi khi byte tiếng đầu tiên đã ra dây. Mọi lời gọi chạy ở task nền và nuốt lỗi — BE sập thì cuộc
+gọi vẫn chạy bình thường, chỉ là không có transcript.
+
+`call_id` cũng được gửi kèm mỗi lần tạo đơn làm **khoá chống trùng**: POST bị timeout rồi gửi lại
+cũng chỉ ra một đơn.
